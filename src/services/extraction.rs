@@ -40,7 +40,22 @@ impl ExtractionService {
         Self { config, db_service }
     }
 
-    pub async fn get_latest_planet_pmtiles_url(&self) -> Result<String, ExtractionError> {
+    pub async fn get_planet_pmtiles_source(&self) -> Result<String, ExtractionError> {
+        // Check if a local planet pmtiles path is configured
+        if let Some(ref local_path) = self.config.planet_pmtiles_path {
+            let path = Path::new(local_path);
+            if path.exists() {
+                println!("Using local planet pmtiles file: {}", local_path);
+                return Ok(local_path.clone());
+            } else {
+                return Err(ExtractionError::PlanetUrlFailed(format!(
+                    "Local planet pmtiles file not found: {}",
+                    local_path
+                )));
+            }
+        }
+
+        // Fall back to fetching the remote URL
         println!("Fetching latest planet pmtiles URL...");
 
         let response = reqwest::get(&self.config.protomaps_builds_url)
@@ -140,7 +155,7 @@ impl ExtractionService {
         &self,
         country_codes: &[String],
     ) -> Result<(), ExtractionError> {
-        let planet_url = self.get_latest_planet_pmtiles_url().await?;
+        let planet_url = self.get_planet_pmtiles_source().await?;
 
         for country_code in country_codes {
             println!("Processing country: {}", country_code);

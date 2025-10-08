@@ -10,6 +10,7 @@ pub struct Config {
     pub find_cmd: String,
     pub whosonfirst_db_url: String,
     pub protomaps_builds_url: String,
+    pub planet_pmtiles_path: Option<String>,
     pub target_countries: Vec<String>,
     pub max_concurrent_extractions: usize,
     pub db_connection_pool_size: u32,
@@ -34,6 +35,9 @@ impl Config {
             }),
             protomaps_builds_url: env::var("PROTOMAPS_BUILDS_URL")
                 .unwrap_or_else(|_| "https://build-metadata.protomaps.dev/builds.json".to_string()),
+            planet_pmtiles_path: env::var("PLANET_PMTILES_PATH")
+                .ok()
+                .filter(|s| !s.is_empty()),
             target_countries: env::var("TARGET_COUNTRIES")
                 .unwrap_or_else(|_| "".to_string())
                 .split(',')
