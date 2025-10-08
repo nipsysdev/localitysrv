@@ -1,6 +1,6 @@
-# Torality - Pmtiles Server for World Localities
+# localitysrv - Pmtiles Server for World Localities
 
-Torality is an HTTP server built with Rust and Axum that serves pmtiles (vector
+localitysrv is an HTTP server built with Rust and Axum that serves pmtiles (vector
 tiles) for localities (cities, towns, villages) from around the world. It
 extracts and serves pmtiles files based on geographic boundaries from the
 WhosOnFirst admin database, using the latest Protomaps planet tiles as the source.
@@ -17,7 +17,7 @@ WhosOnFirst admin database, using the latest Protomaps planet tiles as the sourc
 
 ## Prerequisites
 
-Before running Torality, ensure you have the following command-line tools
+Before running localitysrv, ensure you have the following command-line tools
 installed:
 
 - `pmtiles` - For extracting pmtiles files
@@ -29,8 +29,8 @@ installed:
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/nipsysdev/torality.git
-   cd torality
+   git clone https://github.com/nipsysdev/localitysrv.git
+   cd localitysrv
    ```
 
 2. Install Rust if you haven't already:\

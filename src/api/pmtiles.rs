@@ -37,7 +37,7 @@ pub async fn serve_pmtiles(
                 .captures(range_str)
             {
                 let start: u64 = caps[1].parse().unwrap_or(0);
-                let end = if &caps[2] == "" {
+                let end = if caps[2].is_empty() {
                     file_size - 1
                 } else {
                     caps[2].parse().unwrap_or(file_size - 1)
@@ -59,7 +59,7 @@ pub async fn serve_pmtiles(
                     }
 
                     // Read the specific range
-                    let mut buffer = vec![0u8; content_length as usize];
+                    let mut buffer = vec![0u8; content_length.try_into().unwrap_or(0)];
                     match file.read_exact(&mut buffer).await {
                         Ok(_) => {}
                         Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),

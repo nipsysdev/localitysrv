@@ -6,14 +6,25 @@ use crate::{
     },
     services::{country::CountryService, database::DatabaseService, extraction::ExtractionService},
 };
+use anyhow::Result;
+use arti_client::{TorClient, TorClientConfig};
 use axum::{
     routing::{get, Router},
     Json,
 };
+use futures::StreamExt;
+use hyper::{body::Incoming, Request};
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server;
 use reqwest::StatusCode;
+use safelog::{sensitive, DisplayRedacted as _};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::signal;
+use tor_cell::relaycell::msg::Connected;
+use tor_hsservice::{config::OnionServiceConfigBuilder, StreamRequest};
+use tor_proto::client::stream::IncomingStreamRequest;
+use tower::Service;
 use tower_http::cors::CorsLayer;
 
 mod api;
@@ -33,6 +44,9 @@ pub struct AppState {
 
 #[tokio::main]
 async fn main() {
+    // Initialize tracing for logging
+    tracing_subscriber::fmt::init();
+
     let config = match Config::from_env() {
         Ok(config) => Arc::new(config),
         Err(e) => {
@@ -113,8 +127,17 @@ async fn main() {
             }),
         )
         .layer(CorsLayer::permissive())
-        .with_state(app_state);
+        .with_state(app_state.clone());
 
+    // Check if we should run as a Tor hidden service
+    if std::env::var("TOR_HIDDEN_SERVICE").unwrap_or_else(|_| "false".to_string()) == "true" {
+        run_as_tor_hidden_service(app, app_state).await;
+    } else {
+        run_as_regular_server(app, config).await;
+    }
+}
+
+async fn run_as_regular_server(app: Router, config: Arc<Config>) {
     let listener = TcpListener::bind(&format!("0.0.0.0:{}", config.server_port))
         .await
         .unwrap();
@@ -125,6 +148,71 @@ async fn main() {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .unwrap();
+}
+
+async fn run_as_tor_hidden_service(app: Router, _app_state: AppState) {
+    // The client config includes things like where to store persistent Tor network state.
+    let config = TorClientConfig::default();
+
+    // We now let the Arti client start and bootstrap a connection to the network.
+    let client = TorClient::create_bootstrapped(config).await.unwrap();
+
+    let svc_cfg = OnionServiceConfigBuilder::default()
+        .nickname("localitysrv".parse().unwrap())
+        .build()
+        .unwrap();
+
+    let (service, request_stream) = client.launch_onion_service(svc_cfg).unwrap();
+    println!("{}", service.onion_address().unwrap().display_unredacted());
+
+    // Wait until the service is believed to be fully reachable.
+    eprintln!("waiting for service to become fully reachable");
+    while let Some(status) = service.status_events().next().await {
+        if status.state().is_fully_reachable() {
+            break;
+        }
+    }
+
+    let stream_requests = tor_hsservice::handle_rend_requests(request_stream);
+    tokio::pin!(stream_requests);
+    eprintln!("ready to serve connections");
+
+    while let Some(stream_request) = stream_requests.next().await {
+        let app = app.clone();
+
+        tokio::spawn(async move {
+            let request = stream_request.request().clone();
+            if let Err(err) = handle_stream_request(stream_request, app).await {
+                eprintln!("error serving connection {:?}: {}", sensitive(request), err);
+            };
+        });
+    }
+
+    drop(service);
+    eprintln!("onion service exited cleanly");
+}
+
+async fn handle_stream_request(stream_request: StreamRequest, app: Router) -> Result<()> {
+    match stream_request.request() {
+        IncomingStreamRequest::Begin(begin) if begin.port() == 80 => {
+            let onion_service_stream = stream_request.accept(Connected::new_empty()).await?;
+            let io = TokioIo::new(onion_service_stream);
+
+            let hyper_service = hyper::service::service_fn(move |request: Request<Incoming>| {
+                app.clone().call(request)
+            });
+
+            server::conn::auto::Builder::new(TokioExecutor::new())
+                .serve_connection(io, hyper_service)
+                .await
+                .map_err(|x| anyhow::anyhow!(x))?;
+        }
+        _ => {
+            stream_request.shutdown_circuit()?;
+        }
+    }
+
+    Ok(())
 }
 
 async fn shutdown_signal() {

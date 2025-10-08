@@ -1,7 +1,7 @@
+use rusqlite::Row;
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Locality {
     pub id: i64,
     pub name: String,
@@ -13,6 +13,23 @@ pub struct Locality {
     pub min_latitude: f64,
     pub max_longitude: f64,
     pub max_latitude: f64,
+}
+
+impl Locality {
+    pub fn from_row(row: &Row) -> Result<Self, rusqlite::Error> {
+        Ok(Self {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            country: row.get(2)?,
+            placetype: row.get(3)?,
+            latitude: row.get(4)?,
+            longitude: row.get(5)?,
+            min_longitude: row.get(6)?,
+            min_latitude: row.get(7)?,
+            max_longitude: row.get(8)?,
+            max_latitude: row.get(9)?,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,8 +1,10 @@
 use crate::models::locality::Locality;
 use crate::utils::file::FileError;
-use sqlx::SqlitePool;
+use rusqlite::Connection;
 use std::path::Path;
+use std::sync::Arc;
 use thiserror::Error;
+use tokio::sync::Mutex;
 
 #[derive(Error, Debug)]
 pub enum DatabaseError {
@@ -14,8 +16,10 @@ pub enum DatabaseError {
     DownloadFailed(String),
     #[error("Database decompression failed: {0}")]
     DecompressionFailed(String),
-    #[error("SQLx error: {0}")]
-    SqlxError(#[from] sqlx::Error),
+    #[error("Rusqlite error: {0}")]
+    RusqliteError(#[from] rusqlite::Error),
+    #[error("Tokio join error: {0}")]
+    JoinError(#[from] tokio::task::JoinError),
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
     #[error("File error: {0}")]
@@ -25,7 +29,7 @@ pub enum DatabaseError {
 }
 
 pub struct DatabaseService {
-    pool: SqlitePool,
+    conn: Arc<Mutex<Connection>>,
     database_path: String,
     whosonfirst_db_url: String,
     bzip2_cmd: String,
@@ -33,15 +37,15 @@ pub struct DatabaseService {
 
 impl DatabaseService {
     pub async fn new(
-        database_url: &str,
+        _database_url: &str,
         database_path: &str,
         whosonfirst_db_url: &str,
         bzip2_cmd: &str,
     ) -> Result<Self, DatabaseError> {
-        let pool = SqlitePool::connect(database_url).await?;
+        let conn = Connection::open(database_path)?;
 
         let service = Self {
-            pool,
+            conn: Arc::new(Mutex::new(conn)),
             database_path: database_path.to_string(),
             whosonfirst_db_url: whosonfirst_db_url.to_string(),
             bzip2_cmd: bzip2_cmd.to_string(),
@@ -53,64 +57,63 @@ impl DatabaseService {
     }
 
     async fn create_optimized_indexes(&self) -> Result<(), DatabaseError> {
-        // Index for countries query
-        let create_countries_index = r#"
-        CREATE INDEX IF NOT EXISTS spr_countries_query_idx
-        ON spr (placetype, is_current, is_deprecated, country)
-        WHERE placetype = 'locality' AND is_current = 1 AND is_deprecated = 0
-        "#;
+        let conn = self.conn.clone();
 
-        // Index for country count query
-        let create_country_count_index = r#"
-        CREATE INDEX IF NOT EXISTS spr_country_count_query_idx
-        ON spr (placetype, is_current, is_deprecated, country)
-        WHERE placetype = 'locality' AND is_current = 1 AND is_deprecated = 0
-        "#;
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
 
-        // Index for localities pagination queries
-        let create_pagination_index = r#"
-        CREATE INDEX IF NOT EXISTS spr_localities_pagination_idx
-        ON spr (placetype, is_current, is_deprecated, country, name)
-        WHERE placetype = 'locality' AND is_current = 1 AND is_deprecated = 0
-        "#;
+            // Index for countries query
+            let create_countries_index = r#"
+            CREATE INDEX IF NOT EXISTS spr_countries_query_idx
+            ON spr (placetype, is_current, is_deprecated, country)
+            WHERE placetype = 'locality' AND is_current = 1 AND is_deprecated = 0
+            "#;
 
-        // Index for localities search queries (case-insensitive)
-        let create_search_index = r#"
-        CREATE INDEX IF NOT EXISTS spr_localities_search_idx
-        ON spr (placetype, is_current, is_deprecated, country, name COLLATE NOCASE)
-        WHERE placetype = 'locality' AND is_current = 1 AND is_deprecated = 0
-        "#;
+            // Index for country count query
+            let create_country_count_index = r#"
+            CREATE INDEX IF NOT EXISTS spr_country_count_query_idx
+            ON spr (placetype, is_current, is_deprecated, country)
+            WHERE placetype = 'locality' AND is_current = 1 AND is_deprecated = 0
+            "#;
 
-        // Index for localities count queries
-        let create_count_index = r#"
-        CREATE INDEX IF NOT EXISTS spr_localities_count_idx
-        ON spr (placetype, is_current, is_deprecated, country)
-        WHERE placetype = 'locality' AND is_current = 1 AND is_deprecated = 0
-        "#;
+            // Index for localities pagination queries
+            let create_pagination_index = r#"
+            CREATE INDEX IF NOT EXISTS spr_localities_pagination_idx
+            ON spr (placetype, is_current, is_deprecated, country, name)
+            WHERE placetype = 'locality' AND is_current = 1 AND is_deprecated = 0
+            "#;
 
-        // Index for localities search count queries (case-insensitive)
-        let create_search_count_index = r#"
-        CREATE INDEX IF NOT EXISTS spr_localities_search_count_idx
-        ON spr (placetype, is_current, is_deprecated, country, name COLLATE NOCASE)
-        WHERE placetype = 'locality' AND is_current = 1 AND is_deprecated = 0
-        "#;
+            // Index for localities search queries (case-insensitive)
+            let create_search_index = r#"
+            CREATE INDEX IF NOT EXISTS spr_localities_search_idx
+            ON spr (placetype, is_current, is_deprecated, country, name COLLATE NOCASE)
+            WHERE placetype = 'locality' AND is_current = 1 AND is_deprecated = 0
+            "#;
 
-        sqlx::query(create_countries_index)
-            .execute(&self.pool)
-            .await?;
-        sqlx::query(create_country_count_index)
-            .execute(&self.pool)
-            .await?;
-        sqlx::query(create_pagination_index)
-            .execute(&self.pool)
-            .await?;
-        sqlx::query(create_search_index).execute(&self.pool).await?;
-        sqlx::query(create_count_index).execute(&self.pool).await?;
-        sqlx::query(create_search_count_index)
-            .execute(&self.pool)
-            .await?;
+            // Index for localities count queries
+            let create_count_index = r#"
+            CREATE INDEX IF NOT EXISTS spr_localities_count_idx
+            ON spr (placetype, is_current, is_deprecated, country)
+            WHERE placetype = 'locality' AND is_current = 1 AND is_deprecated = 0
+            "#;
 
-        Ok(())
+            // Index for localities search count queries (case-insensitive)
+            let create_search_count_index = r#"
+            CREATE INDEX IF NOT EXISTS spr_localities_search_count_idx
+            ON spr (placetype, is_current, is_deprecated, country, name COLLATE NOCASE)
+            WHERE placetype = 'locality' AND is_current = 1 AND is_deprecated = 0
+            "#;
+
+            conn.execute(create_countries_index, [])?;
+            conn.execute(create_country_count_index, [])?;
+            conn.execute(create_pagination_index, [])?;
+            conn.execute(create_search_index, [])?;
+            conn.execute(create_count_index, [])?;
+            conn.execute(create_search_count_index, [])?;
+
+            Ok::<(), DatabaseError>(())
+        })
+        .await?
     }
 
     pub async fn ensure_database_present(&self) -> Result<(), DatabaseError> {
@@ -172,35 +175,38 @@ impl DatabaseService {
         country_code: &str,
         query: Option<&str>,
     ) -> Result<u32, DatabaseError> {
-        let conditions = [
-            "placetype = 'locality'",
-            "is_current = 1",
-            "is_deprecated = 0",
-            "country = ?",
-        ];
+        let conn = self.conn.clone();
+        let country_code = country_code.to_string();
+        let query_param = query.map(|q| format!("{}%", q));
 
-        let where_clause = conditions.join(" AND ");
-        let query_str = format!("SELECT COUNT(*) as count FROM spr WHERE {}", where_clause);
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
 
-        let (count,) = if let Some(q) = query {
-            let search_query = format!(
-                "SELECT COUNT(*) as count FROM spr WHERE {} AND name LIKE ? COLLATE NOCASE",
-                where_clause
-            );
-            let search_param = format!("{}%", q);
-            sqlx::query_as::<_, (i64,)>(&search_query)
-                .bind(country_code)
-                .bind(&search_param)
-                .fetch_one(&self.pool)
-                .await?
-        } else {
-            sqlx::query_as::<_, (i64,)>(&query_str)
-                .bind(country_code)
-                .fetch_one(&self.pool)
-                .await?
-        };
+            let conditions = [
+                "placetype = 'locality'",
+                "is_current = 1",
+                "is_deprecated = 0",
+                "country = ?1",
+            ];
 
-        Ok(count as u32)
+            let where_clause = conditions.join(" AND ");
+
+            let count = if let Some(q) = query_param {
+                let search_query = format!(
+                    "SELECT COUNT(*) as count FROM spr WHERE {} AND name LIKE ?2 COLLATE NOCASE",
+                    where_clause
+                );
+                conn.query_row(&search_query, [&country_code, &q], |row| {
+                    row.get::<_, i64>(0)
+                })
+            } else {
+                let query_str = format!("SELECT COUNT(*) as count FROM spr WHERE {}", where_clause);
+                conn.query_row(&query_str, [&country_code], |row| row.get::<_, i64>(0))
+            };
+
+            Ok(count.map(|c| c as u32)?)
+        })
+        .await?
     }
 
     pub async fn get_localities(
@@ -210,99 +216,113 @@ impl DatabaseService {
         limit: u32,
         query: Option<&str>,
     ) -> Result<Vec<Locality>, DatabaseError> {
+        let conn = self.conn.clone();
+        let country_code = country_code.to_string();
+        let query_param = query.map(|q| format!("{}%", q));
         let offset = (page - 1) * limit;
 
-        let conditions = [
-            "placetype = 'locality'",
-            "is_current = 1",
-            "is_deprecated = 0",
-            "country = ?",
-        ];
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            
+            let conditions = [
+                "placetype = 'locality'",
+                "is_current = 1",
+                "is_deprecated = 0",
+                "country = ?1",
+            ];
 
-        let where_clause = conditions.join(" AND ");
+            let where_clause = conditions.join(" AND ");
 
-        let localities = if let Some(q) = query {
-            let search_query = format!(
-                "SELECT id, name, country, placetype, latitude, longitude, min_longitude, min_latitude, max_longitude, max_latitude FROM spr WHERE {} AND name LIKE ? COLLATE NOCASE ORDER BY name COLLATE NOCASE ASC LIMIT ? OFFSET ?",
-                where_clause
-            );
-            let search_param = format!("{}%", q);
-            sqlx::query_as::<_, Locality>(&search_query)
-                .bind(country_code)
-                .bind(&search_param)
-                .bind(limit)
-                .bind(offset)
-                .fetch_all(&self.pool)
-                .await?
-        } else {
-            let paginated_query = format!(
-                "SELECT id, name, country, placetype, latitude, longitude, min_longitude, min_latitude, max_longitude, max_latitude FROM spr WHERE {} ORDER BY name ASC LIMIT ? OFFSET ?",
-                where_clause
-            );
-            sqlx::query_as::<_, Locality>(&paginated_query)
-                .bind(country_code)
-                .bind(limit)
-                .bind(offset)
-                .fetch_all(&self.pool)
-                .await?
-        };
+            let localities = if let Some(q) = query_param {
+                let search_query = format!(
+                    "SELECT id, name, country, placetype, latitude, longitude, min_longitude, min_latitude, max_longitude, max_latitude FROM spr WHERE {} AND name LIKE ?2 COLLATE NOCASE ORDER BY name COLLATE NOCASE ASC LIMIT ?3 OFFSET ?4",
+                    where_clause
+                );
+                let mut stmt = conn.prepare(&search_query)?;
+                let rows = stmt.query_map([&country_code, &q, &limit.to_string(), &offset.to_string()], |row| {
+                    Locality::from_row(row)
+                })?;
+                rows.collect::<Result<Vec<_>, _>>()?
+            } else {
+                let paginated_query = format!(
+                    "SELECT id, name, country, placetype, latitude, longitude, min_longitude, min_latitude, max_longitude, max_latitude FROM spr WHERE {} ORDER BY name ASC LIMIT ?2 OFFSET ?3",
+                    where_clause
+                );
+                let mut stmt = conn.prepare(&paginated_query)?;
+                let rows = stmt.query_map([&country_code, &limit.to_string(), &offset.to_string()], |row| {
+                    Locality::from_row(row)
+                })?;
+                rows.collect::<Result<Vec<_>, _>>()?
+            };
 
-        Ok(localities)
+            Ok(localities)
+        }).await?
     }
 
     pub async fn get_country_localities(
         &self,
         country_code: &str,
     ) -> Result<Vec<Locality>, DatabaseError> {
-        let conditions = [
-            "placetype = 'locality'",
-            "is_current = 1",
-            "is_deprecated = 0",
-            "name IS NOT NULL",
-            "name != ''",
-            "latitude IS NOT NULL",
-            "longitude IS NOT NULL",
-            "min_longitude IS NOT NULL",
-            "min_latitude IS NOT NULL",
-            "max_longitude IS NOT NULL",
-            "max_latitude IS NOT NULL",
-            "country = ?",
-        ];
+        let conn = self.conn.clone();
+        let country_code = country_code.to_string();
 
-        let where_clause = conditions.join(" AND ");
-        let query_str = format!(
-            "SELECT id, name, country, placetype, latitude, longitude, min_longitude, min_latitude, max_longitude, max_latitude FROM spr WHERE {} ORDER BY id",
-            where_clause
-        );
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            
+            let conditions = [
+                "placetype = 'locality'",
+                "is_current = 1",
+                "is_deprecated = 0",
+                "name IS NOT NULL",
+                "name != ''",
+                "latitude IS NOT NULL",
+                "longitude IS NOT NULL",
+                "min_longitude IS NOT NULL",
+                "min_latitude IS NOT NULL",
+                "max_longitude IS NOT NULL",
+                "max_latitude IS NOT NULL",
+                "country = ?1",
+            ];
 
-        let localities = sqlx::query_as::<_, Locality>(&query_str)
-            .bind(country_code)
-            .fetch_all(&self.pool)
-            .await?;
+            let where_clause = conditions.join(" AND ");
+            let query_str = format!(
+                "SELECT id, name, country, placetype, latitude, longitude, min_longitude, min_latitude, max_longitude, max_latitude FROM spr WHERE {} ORDER BY id",
+                where_clause
+            );
 
-        Ok(localities)
+            let mut stmt = conn.prepare(&query_str)?;
+            let rows = stmt.query_map([&country_code], |row| {
+                Locality::from_row(row)
+            })?;
+            
+            let localities = rows.collect::<Result<Vec<_>, _>>()?;
+            Ok(localities)
+        }).await?
     }
 
     pub async fn get_country_locality_count(
         &self,
         country_code: &str,
     ) -> Result<u32, DatabaseError> {
-        let conditions = [
-            "placetype = 'locality'",
-            "is_current = 1",
-            "is_deprecated = 0",
-            "country = ?",
-        ];
+        let conn = self.conn.clone();
+        let country_code = country_code.to_string();
 
-        let where_clause = conditions.join(" AND ");
-        let query_str = format!("SELECT COUNT(*) as count FROM spr WHERE {}", where_clause);
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            
+            let conditions = [
+                "placetype = 'locality'",
+                "is_current = 1",
+                "is_deprecated = 0",
+                "country = ?1",
+            ];
 
-        let (count,) = sqlx::query_as::<_, (i64,)>(&query_str)
-            .bind(country_code)
-            .fetch_one(&self.pool)
-            .await?;
+            let where_clause = conditions.join(" AND ");
+            let query_str = format!("SELECT COUNT(*) as count FROM spr WHERE {}", where_clause);
 
-        Ok(count as u32)
+            let count = conn.query_row(&query_str, [&country_code], |row| row.get::<_, i64>(0))?;
+            Ok(count as u32)
+        }).await?
     }
 
     pub async fn get_countries_locality_counts(
@@ -313,36 +333,48 @@ impl DatabaseService {
             return Ok(std::collections::HashMap::new());
         }
 
-        let conditions = [
-            "placetype = 'locality'",
-            "is_current = 1",
-            "is_deprecated = 0",
-        ];
+        let conn = self.conn.clone();
+        let country_codes = country_codes.to_vec();
 
-        let base_where_clause = conditions.join(" AND ");
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            
+            let conditions = [
+                "placetype = 'locality'",
+                "is_current = 1",
+                "is_deprecated = 0",
+            ];
 
-        let placeholders: Vec<_> = country_codes.iter().map(|_| "?").collect();
-        let in_clause = format!("country IN ({})", placeholders.join(","));
+            let base_where_clause = conditions.join(" AND ");
 
-        let where_clause = format!("{} AND {}", base_where_clause, in_clause);
-        let query_str = format!(
-            "SELECT country, COUNT(*) as count FROM spr WHERE {} GROUP BY country",
-            where_clause
-        );
+            let placeholders: Vec<_> = country_codes.iter().map(|_| "?").collect();
+            let in_clause = format!("country IN ({})", placeholders.join(","));
 
-        let mut query = sqlx::query_as::<_, (String, i64)>(&query_str);
+            let where_clause = format!("{} AND {}", base_where_clause, in_clause);
+            let query_str = format!(
+                "SELECT country, COUNT(*) as count FROM spr WHERE {} GROUP BY country",
+                where_clause
+            );
 
-        for country_code in country_codes {
-            query = query.bind(country_code);
-        }
+            let mut stmt = conn.prepare(&query_str)?;
+            
+            // Create parameter values
+            let params: Vec<&dyn rusqlite::ToSql> = country_codes
+                .iter()
+                .map(|s| s as &dyn rusqlite::ToSql)
+                .collect();
+            
+            let rows = stmt.query_map(params.as_slice(), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?;
+            
+            let mut counts = std::collections::HashMap::new();
+            for row in rows {
+                let (country, count) = row?;
+                counts.insert(country, count as u32);
+            }
 
-        let results = query.fetch_all(&self.pool).await?;
-
-        let mut counts = std::collections::HashMap::new();
-        for (country, count) in results {
-            counts.insert(country, count as u32);
-        }
-
-        Ok(counts)
+            Ok(counts)
+        }).await?
     }
 }
