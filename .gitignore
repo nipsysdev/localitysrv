@@ -1,0 +1,6 @@
+/target
+.vscode
+*.bz2
+*.db
+*.pmtiles
+.kilocode
