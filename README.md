@@ -14,6 +14,8 @@ WhosOnFirst admin database, using the latest Protomaps planet tiles as the sourc
 - **Range Request Support**: Supports HTTP range requests for efficient pmtiles file serving
 - **Search Functionality**: Search localities by name with pagination support
 - **Country Filtering**: Limit processing to specific countries if needed
+- **Local Planet PMTiles Support**: Use a local planet pmtiles file instead of downloading from remote
+- **Tor Hidden Service Support**: Run as a Tor hidden service for enhanced privacy thanks to Arti
 
 ## Prerequisites
 
@@ -62,6 +64,9 @@ On the first run, the application will:
 3. Decompress the database to SQLite format
 4. Check for existing pmtiles files
 5. Prompt you to extract missing pmtiles files if needed
+
+> You can also use a local planet pmtiles file instead of downloading from remote by setting
+> the `PLANET_PMTILES_PATH` environment variable to the path of your local planet.pmtiles file.
 
 > Be aware that, by default, all localities from every country available will be
 > queued for extraction.\
@@ -157,9 +162,11 @@ Configuration can be set through environment variables in a `.env` file:
 - `FIND_CMD`: Command-line tool for file operations (default: find)
 - `WHOSEONFIRST_DB_URL`: URL for the WhosOnFirst database
 - `PROTOMAPS_BUILDS_URL`: URL for Protomaps builds JSON list
+- `PLANET_PMTILES_PATH`: Path to a local planet pmtiles file (optional, if not set will download from remote)
 - `TARGET_COUNTRIES`: Comma-separated list of country codes to process (empty = ALL)
 - `MAX_CONCURRENT_EXTRACTIONS`: Maximum number of concurrent extraction tasks (default: 10)
 - `DB_CONNECTION_POOL_SIZE`: Database connection pool size (default: 10)
+- `TOR_HIDDEN_SERVICE`: Set to "true" to run as a Tor hidden service (default: false)
 
 Example `.env` file:
 ```
@@ -178,12 +185,18 @@ WHOSEONFIRST_DB_URL=https://data.geocode.earth/wof/dist/sqlite/whosonfirst-data-
 # Protomaps Configuration
 PROTOMAPS_BUILDS_URL=https://build-metadata.protomaps.dev/builds.json
 
+# Local Planet PMTiles (optional)
+# PLANET_PMTILES_PATH=/path/to/your/planet.pmtiles
+
 # Target Countries (comma-separated, empty or ALL for all countries)
-TARGET_COUNTRIES=
+TARGET_COUNTRIES=BE,LU
 
 # Performance Settings
 MAX_CONCURRENT_EXTRACTIONS=10
 DB_CONNECTION_POOL_SIZE=10
+
+# Tor Hidden Service (optional)
+# TOR_HIDDEN_SERVICE=false
 ```
 
 ## Architecture
@@ -192,13 +205,14 @@ The project is built with the following Rust ecosystem:
 
 - **Axum**: Web framework for building the HTTP server
 - **Tokio**: Async runtime for handling concurrent operations
-- **SQLx**: Database driver for SQLite with async support
+- **Rusqlite**: SQLite database driver with async compatibility layer
 - **Reqwest**: HTTP client for downloading files
 - **Serde**: JSON serialization/deserialization
 - **Thiserror**: Error handling
 - **Tower-HTTP**: HTTP middleware including CORS support
 - **Futures**: Utilities for async programming
 - **Tokio-util**: Additional utilities for Tokio
+- **Arti**: Tor client for hidden service functionality
 
 ### Project Structure
 
