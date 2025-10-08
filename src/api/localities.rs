@@ -111,7 +111,7 @@ pub async fn search_localities(
             "total": total,
             "page": page,
             "limit": limit,
-            "totalPages": total_pages
+            "total_pages": total_pages
         }
     }))
 }
