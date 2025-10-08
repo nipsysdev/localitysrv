@@ -1,7 +1,7 @@
-# localitysrv - Pmtiles Server for World Localities
+# localitysrv - pmtiles server and Tor hidden service for serving world localities
 
-localitysrv is an HTTP server built with Rust and Axum that serves pmtiles (vector
-tiles) for localities (cities, towns, villages) from around the world. It
+localitysrv is an HTTP server built with Rust and Axum, which can also be started as a Tor .onion service, that serves pmtiles (vector tiles) for localities (cities, towns, villages) from around the world.\
+It
 extracts and serves pmtiles files based on geographic boundaries from the
 WhosOnFirst admin database, using the latest Protomaps planet tiles as the source.
 
