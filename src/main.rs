@@ -20,7 +20,6 @@ use reqwest::StatusCode;
 use safelog::{sensitive, DisplayRedacted as _};
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tokio::signal;
 use tor_cell::relaycell::msg::Connected;
 use tor_hsservice::{config::OnionServiceConfigBuilder, StreamRequest};
 use tor_proto::client::stream::IncomingStreamRequest;
@@ -44,7 +43,6 @@ pub struct AppState {
 
 #[tokio::main]
 async fn main() {
-    // Initialize tracing for logging
     tracing_subscriber::fmt::init();
 
     let config = match Config::from_env() {
@@ -129,32 +127,74 @@ async fn main() {
         .layer(CorsLayer::permissive())
         .with_state(app_state.clone());
 
-    // Check if we should run as a Tor hidden service
-    if std::env::var("TOR_HIDDEN_SERVICE").unwrap_or_else(|_| "false".to_string()) == "true" {
-        run_as_tor_hidden_service(app, app_state).await;
-    } else {
-        run_as_regular_server(app, config).await;
+    println!("Starting TCP listener and Tor hidden service");
+
+    let shutdown_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+
+    let app_for_tor = app.clone();
+    let app_for_regular = app.clone();
+
+    let shutdown_signal_tor = shutdown_signal.clone();
+    let shutdown_signal_regular = shutdown_signal.clone();
+
+    let tor_handle = tokio::spawn(async move {
+        run_as_tor_hidden_service(app_for_tor, app_state.clone(), shutdown_signal_tor).await;
+    });
+
+    let regular_handle = tokio::spawn(async move {
+        run_tcp_listener(app_for_regular, config.clone(), shutdown_signal_regular).await;
+    });
+
+    tokio::select! {
+        _ = tor_handle => {
+            println!("Tor hidden service shutdown");
+        }
+        _ = regular_handle => {
+            println!("TCP listener shutdown");
+        }
+        _ = tokio::signal::ctrl_c() => {
+            println!("\nShutdown signal received, shutting down...");
+            shutdown_signal.notify_waiters();
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        }
     }
 }
 
-async fn run_as_regular_server(app: Router, config: Arc<Config>) {
-    let listener = TcpListener::bind(&format!("0.0.0.0:{}", config.server_port))
+async fn run_tcp_listener(
+    app: Router,
+    config: Arc<Config>,
+    shutdown_signal: std::sync::Arc<tokio::sync::Notify>,
+) {
+    println!("Starting TCP listener...");
+    let address = "127.0.0.1";
+    let listener = TcpListener::bind(&format!("{}:{}", address, config.server_port))
         .await
         .unwrap();
 
-    println!("Server listening on http://0.0.0.0:{}", config.server_port);
+    println!(
+        "✓ TCP listener binded to http://{}:{}",
+        address, config.server_port
+    );
 
+    let shutdown = shutdown_signal.clone();
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            shutdown.notified().await;
+        })
         .await
         .unwrap();
 }
 
-async fn run_as_tor_hidden_service(app: Router, _app_state: AppState) {
-    // The client config includes things like where to store persistent Tor network state.
+async fn run_as_tor_hidden_service(
+    app: Router,
+    _app_state: AppState,
+    shutdown_signal: std::sync::Arc<tokio::sync::Notify>,
+) {
+    println!("Starting Tor hidden service...");
+
     let config = TorClientConfig::default();
 
-    // We now let the Arti client start and bootstrap a connection to the network.
     let client = TorClient::create_bootstrapped(config).await.unwrap();
 
     let svc_cfg = OnionServiceConfigBuilder::default()
@@ -163,33 +203,58 @@ async fn run_as_tor_hidden_service(app: Router, _app_state: AppState) {
         .unwrap();
 
     let (service, request_stream) = client.launch_onion_service(svc_cfg).unwrap();
-    println!("{}", service.onion_address().unwrap().display_unredacted());
+    let onion_address = service
+        .onion_address()
+        .unwrap()
+        .display_unredacted()
+        .to_string();
 
-    // Wait until the service is believed to be fully reachable.
-    eprintln!("waiting for service to become fully reachable");
-    while let Some(status) = service.status_events().next().await {
-        if status.state().is_fully_reachable() {
-            break;
+    println!(
+        "Waiting for Tor hidden service to be available at: {}",
+        onion_address
+    );
+
+    // Wait for the service to be reachable with timeout
+    let mut status_events = service.status_events();
+
+    tokio::select! {
+        biased;
+        _ = shutdown_signal.notified() => {
+            drop(service);
+            return;
+        }
+        Some(status) = status_events.next() => {
+            if status.state().is_fully_reachable() {
+                println!("✓ Tor hidden service is now fully reachable at http://{}", onion_address);
+            }
         }
     }
 
     let stream_requests = tor_hsservice::handle_rend_requests(request_stream);
     tokio::pin!(stream_requests);
-    eprintln!("ready to serve connections");
 
-    while let Some(stream_request) = stream_requests.next().await {
-        let app = app.clone();
+    let shutdown = shutdown_signal.clone();
 
-        tokio::spawn(async move {
-            let request = stream_request.request().clone();
-            if let Err(err) = handle_stream_request(stream_request, app).await {
-                eprintln!("error serving connection {:?}: {}", sensitive(request), err);
-            };
-        });
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutdown.notified() => {
+                println!("Tor hidden service shutting down...");
+                drop(service);
+                return;
+            }
+            Some(stream_request) = stream_requests.next() => {
+                let app_clone = app.clone();
+
+                tokio::spawn(async move {
+                    let request = stream_request.request().clone();
+                    if let Err(err) = handle_stream_request(stream_request, app_clone).await {
+                        eprintln!("error serving connection {:?}: {}", sensitive(request), err);
+                    };
+                });
+            }
+        }
     }
-
-    drop(service);
-    eprintln!("onion service exited cleanly");
 }
 
 async fn handle_stream_request(stream_request: StreamRequest, app: Router) -> Result<()> {
@@ -213,30 +278,4 @@ async fn handle_stream_request(stream_request: StreamRequest, app: Router) -> Re
     }
 
     Ok(())
-}
-
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
-    };
-
-    #[cfg(unix)]
-    let terminate = async {
-        signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("failed to install signal handler")
-            .recv()
-            .await;
-    };
-
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
-    }
-
-    println!("Signal received, starting graceful shutdown");
 }
