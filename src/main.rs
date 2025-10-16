@@ -106,7 +106,7 @@ async fn main() {
     };
 
     let app = Router::new()
-        .route("/countries", get(countries::get_countries))
+        .route("/countries", get(countries::search_countries))
         .route(
             "/countries/{country_code}/localities",
             get(localities::search_localities),

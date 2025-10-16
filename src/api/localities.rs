@@ -20,7 +20,7 @@ pub async fn search_localities(
     Query(params): Query<LocalityQueryParams>,
 ) -> Json<serde_json::Value> {
     let page = params.page.unwrap_or(1);
-    let limit = params.limit.unwrap_or(20);
+    let limit = params.limit.unwrap_or(10);
     let query = params.q.as_deref();
 
     if page < 1 {

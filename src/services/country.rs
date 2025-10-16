@@ -51,21 +51,41 @@ impl CountryService {
         self.country_codes.get(country_code)
     }
 
-    pub async fn get_countries(
+    pub async fn get_countries_paginated(
         &self,
         db_service: &crate::services::database::DatabaseService,
         target_countries: &[String],
-    ) -> Vec<crate::models::country::CountryInfo> {
-        let mut countries = Vec::new();
-
+        page: u32,
+        limit: u32,
+        query: Option<&str>,
+    ) -> Result<Vec<crate::models::country::CountryInfo>, CountryError> {
         let countries_to_process = self.get_countries_to_process(target_countries);
 
+        let filtered_countries = if let Some(q) = query {
+            countries_to_process
+                .into_iter()
+                .filter(|code| {
+                    if let Some(name) = self.country_codes.get(code) {
+                        name.to_lowercase().contains(&q.to_lowercase())
+                            || code.to_lowercase().contains(&q.to_lowercase())
+                    } else {
+                        false
+                    }
+                })
+                .collect()
+        } else {
+            countries_to_process
+        };
+
+        let mut countries = Vec::new();
+
+        // Get all countries with their counts
         match db_service
-            .get_countries_locality_counts(&countries_to_process)
+            .get_countries_locality_counts(&filtered_countries)
             .await
         {
             Ok(counts) => {
-                for code in countries_to_process {
+                for code in filtered_countries {
                     if let Some(name) = self.country_codes.get(&code) {
                         // Get the locality count from the batch result
                         let count = counts.get(&code).copied().unwrap_or(0);
@@ -81,7 +101,7 @@ impl CountryService {
                 }
             }
             Err(_) => {
-                for code in countries_to_process {
+                for code in filtered_countries {
                     if let Some(name) = self.country_codes.get(&code) {
                         match db_service.get_country_locality_count(&code).await {
                             Ok(count) => {
@@ -102,13 +122,67 @@ impl CountryService {
             }
         }
 
+        // Sort by country name
         countries.sort_by(|a, b| {
             a.country_name
                 .to_lowercase()
                 .cmp(&b.country_name.to_lowercase())
         });
 
-        countries
+        // Apply pagination
+        let offset = (page - 1) * limit;
+        let end = std::cmp::min(offset + limit, countries.len() as u32);
+        let paginated_countries = countries
+            .into_iter()
+            .skip(offset as usize)
+            .take((end - offset) as usize)
+            .collect();
+
+        Ok(paginated_countries)
+    }
+
+    pub async fn get_countries_count(
+        &self,
+        db_service: &crate::services::database::DatabaseService,
+        target_countries: &[String],
+        query: Option<&str>,
+    ) -> Result<u32, CountryError> {
+        let countries_to_process = self.get_countries_to_process(target_countries);
+
+        let filtered_countries = if let Some(q) = query {
+            countries_to_process
+                .into_iter()
+                .filter(|code| {
+                    if let Some(name) = self.country_codes.get(code) {
+                        name.to_lowercase().contains(&q.to_lowercase())
+                            || code.to_lowercase().contains(&q.to_lowercase())
+                    } else {
+                        false
+                    }
+                })
+                .collect()
+        } else {
+            countries_to_process
+        };
+
+        let mut count = 0;
+
+        for code in filtered_countries {
+            if self.country_codes.contains_key(&code) {
+                match db_service.get_country_locality_count(&code).await {
+                    Ok(locality_count) => {
+                        if locality_count > 0 {
+                            count += 1;
+                        }
+                    }
+                    Err(_) => {
+                        continue;
+                    }
+                }
+            }
+        }
+
+        Ok(count)
     }
 
     fn create_default_country_codes() -> HashMap<String, String> {
