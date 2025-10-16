@@ -137,10 +137,18 @@ async fn main() {
 
     let (onion_address_tx, onion_address_rx) = tokio::sync::oneshot::channel();
 
+    // Clone the app_state for the Tor service
+    let app_state_for_tor = app_state.clone();
+
+    // Spawn the Tor hidden service
     let tor_handle = tokio::spawn(async move {
-        let onion_address = run_as_tor_hidden_service(app_for_tor, shutdown_signal_tor).await;
-        // Send the onion address back to the main task
-        let _ = onion_address_tx.send(onion_address);
+        run_as_tor_hidden_service(
+            app_for_tor,
+            app_state_for_tor,
+            shutdown_signal_tor,
+            onion_address_tx,
+        )
+        .await;
     });
 
     // Wait for the Tor hidden service to be ready and get the onion address
@@ -157,11 +165,6 @@ async fn main() {
         let mut config = app_state.config.lock().await;
         config.onion_address = Some(onion_address.clone());
     }
-
-    println!(
-        "Tor hidden service is ready with onion address: {}",
-        onion_address
-    );
 
     let regular_handle = tokio::spawn(async move {
         run_tcp_listener(app_for_regular, config.clone(), shutdown_signal_regular).await;
@@ -210,8 +213,10 @@ async fn run_tcp_listener(
 
 async fn run_as_tor_hidden_service(
     app: Router,
+    app_state: AppState,
     shutdown_signal: std::sync::Arc<tokio::sync::Notify>,
-) -> String {
+    onion_address_tx: tokio::sync::oneshot::Sender<String>,
+) {
     println!("Starting Tor hidden service...");
 
     let config = TorClientConfig::default();
@@ -229,6 +234,12 @@ async fn run_as_tor_hidden_service(
         .unwrap()
         .display_unredacted()
         .to_string();
+
+    // Store the onion address in the config
+    {
+        let mut config = app_state.config.lock().await;
+        config.onion_address = Some(onion_address.clone());
+    }
 
     println!(
         "Waiting for Tor hidden service to be available at: {}",
@@ -251,39 +262,34 @@ async fn run_as_tor_hidden_service(
         status_events = service.status_events();
     }
 
-    // Clone the values we need for the spawned task
-    let app_for_task = app.clone();
-    let shutdown_for_task = shutdown_signal.clone();
-    let onion_address_for_return = onion_address.clone();
+    // Send the onion address back to the main task
+    let _ = onion_address_tx.send(onion_address.clone());
 
-    // Spawn a separate task to handle the service loop
-    tokio::spawn(async move {
-        let stream_requests = tor_hsservice::handle_rend_requests(request_stream);
-        tokio::pin!(stream_requests);
+    let stream_requests = tor_hsservice::handle_rend_requests(request_stream);
+    tokio::pin!(stream_requests);
 
-        loop {
-            tokio::select! {
-                biased;
-                _ = shutdown_for_task.notified() => {
-                    println!("Tor hidden service shutting down...");
-                    drop(service);
-                    return;
-                }
-                Some(stream_request) = stream_requests.next() => {
-                    let app_clone = app_for_task.clone();
+    let shutdown = shutdown_signal.clone();
 
-                    tokio::spawn(async move {
-                        let request = stream_request.request().clone();
-                        if let Err(err) = handle_stream_request(stream_request, app_clone).await {
-                            eprintln!("error serving connection {:?}: {}", sensitive(request), err);
-                        };
-                    });
-                }
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutdown.notified() => {
+                println!("Tor hidden service shutting down...");
+                drop(service);
+                return;
+            }
+            Some(stream_request) = stream_requests.next() => {
+                let app_clone = app.clone();
+
+                tokio::spawn(async move {
+                    let request = stream_request.request().clone();
+                    if let Err(err) = handle_stream_request(stream_request, app_clone).await {
+                        eprintln!("error serving connection {:?}: {}", sensitive(request), err);
+                    };
+                });
             }
         }
-    });
-
-    onion_address_for_return
+    }
 }
 
 async fn handle_stream_request(stream_request: StreamRequest, app: Router) -> Result<()> {
