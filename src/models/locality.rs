@@ -45,6 +45,7 @@ pub struct LocalityInfo {
     pub max_longitude: f64,
     pub max_latitude: f64,
     pub file_size: u64,
+    pub onion_link: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

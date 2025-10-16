@@ -2,6 +2,7 @@ use dotenvy::dotenv;
 use std::env;
 use std::path::PathBuf;
 
+#[derive(Clone)]
 pub struct Config {
     pub server_port: u16,
     pub assets_dir: String,
@@ -14,6 +15,7 @@ pub struct Config {
     pub target_countries: Vec<String>,
     pub max_concurrent_extractions: usize,
     pub db_connection_pool_size: u32,
+    pub onion_address: Option<String>,
 }
 
 impl Config {
@@ -52,6 +54,7 @@ impl Config {
                 .unwrap_or_else(|_| "10".to_string())
                 .parse()
                 .unwrap_or(10),
+            onion_address: None,
         })
     }
 

@@ -26,11 +26,12 @@ pub async fn search_countries(
         }));
     }
 
+    let config = app_state.config.lock().await;
     let countries_result = match app_state
         .country_service
         .get_countries_paginated(
             &app_state.db_service,
-            &app_state.config.target_countries,
+            &config.target_countries,
             page,
             limit,
             query,
@@ -48,11 +49,7 @@ pub async fn search_countries(
 
     let total = match app_state
         .country_service
-        .get_countries_count(
-            &app_state.db_service,
-            &app_state.config.target_countries,
-            query,
-        )
+        .get_countries_count(&app_state.db_service, &config.target_countries, query)
         .await
     {
         Ok(count) => count,

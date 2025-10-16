@@ -30,6 +30,7 @@ installed:
 ## Installation
 
 1. Clone the repository:
+
    ```bash
    git clone https://github.com/nipsysdev/localitysrv.git
    cd localitysrv
@@ -166,9 +167,9 @@ Configuration can be set through environment variables in a `.env` file:
 - `TARGET_COUNTRIES`: Comma-separated list of country codes to process (empty = ALL)
 - `MAX_CONCURRENT_EXTRACTIONS`: Maximum number of concurrent extraction tasks (default: 10)
 - `DB_CONNECTION_POOL_SIZE`: Database connection pool size (default: 10)
-- `TOR_HIDDEN_SERVICE`: Set to "true" to run as a Tor hidden service (default: false)
 
 Example `.env` file:
+
 ```
 # Server Configuration
 SERVER_PORT=8080
@@ -196,7 +197,6 @@ MAX_CONCURRENT_EXTRACTIONS=10
 DB_CONNECTION_POOL_SIZE=10
 
 # Tor Hidden Service (optional)
-# TOR_HIDDEN_SERVICE=false
 ```
 
 ## Architecture

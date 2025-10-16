@@ -35,7 +35,7 @@ mod utils;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub config: Arc<Config>,
+    pub config: Arc<tokio::sync::Mutex<Config>>,
     pub db_service: Arc<DatabaseService>,
     pub extraction_service: Arc<ExtractionService>,
     pub country_service: Arc<CountryService>,
@@ -99,7 +99,7 @@ async fn main() {
     }
 
     let app_state = AppState {
-        config: config.clone(),
+        config: Arc::new(tokio::sync::Mutex::new((*config).clone())),
         db_service: db_service.clone(),
         extraction_service: extraction_service.clone(),
         country_service: country_service.clone(),
@@ -186,7 +186,7 @@ async fn run_tcp_listener(
 
 async fn run_as_tor_hidden_service(
     app: Router,
-    _app_state: AppState,
+    app_state: AppState,
     shutdown_signal: std::sync::Arc<tokio::sync::Notify>,
 ) {
     println!("Starting Tor hidden service...");
@@ -206,6 +206,12 @@ async fn run_as_tor_hidden_service(
         .unwrap()
         .display_unredacted()
         .to_string();
+
+    // Store the onion address in the config
+    {
+        let mut config = app_state.config.lock().await;
+        config.onion_address = Some(onion_address.clone());
+    }
 
     println!(
         "Waiting for Tor hidden service to be available at: {}",

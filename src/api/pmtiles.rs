@@ -16,7 +16,8 @@ pub async fn serve_pmtiles(
     Path((country_code, id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Response<Body>, StatusCode> {
-    let file_path = PathBuf::from(&app_state.config.assets_dir)
+    let config = app_state.config.lock().await;
+    let file_path = PathBuf::from(&config.assets_dir)
         .join("localities")
         .join(country_code)
         .join(format!("{}.pmtiles", id));

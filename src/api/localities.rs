@@ -60,6 +60,7 @@ pub async fn search_localities(
 
     let total_pages = (total as f64 / limit as f64).ceil() as u32;
 
+    let config = app_state.config.lock().await;
     let country_code_clone = country_code.clone();
     let localities_info: Vec<LocalityInfo> =
         futures::future::join_all(localities_result.into_iter().map(|locality| {
@@ -73,7 +74,8 @@ pub async fn search_localities(
             let min_latitude = locality.min_latitude;
             let max_longitude = locality.max_longitude;
             let max_latitude = locality.max_latitude;
-            let assets_dir = app_state.config.assets_dir.clone();
+            let assets_dir = config.assets_dir.clone();
+            let onion_address = config.onion_address.clone();
             let country_code_for_async = country_code_clone.clone();
 
             async move {
@@ -87,6 +89,13 @@ pub async fn search_localities(
                     Err(_) => 0,
                 };
 
+                let onion_link = onion_address.map(|address| {
+                    format!(
+                        "http://{}/countries/{}/localities/{}/pmtiles",
+                        address, country_code_for_async, id
+                    )
+                });
+
                 LocalityInfo {
                     id,
                     name,
@@ -99,6 +108,7 @@ pub async fn search_localities(
                     max_longitude,
                     max_latitude,
                     file_size,
+                    onion_link,
                 }
             }
         }))
