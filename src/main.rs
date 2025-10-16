@@ -127,8 +127,6 @@ async fn main() {
         .layer(CorsLayer::permissive())
         .with_state(app_state.clone());
 
-    println!("Starting TCP listener and Tor hidden service");
-
     let shutdown_signal = std::sync::Arc::new(tokio::sync::Notify::new());
 
     let app_for_tor = app.clone();
@@ -214,20 +212,20 @@ async fn run_as_tor_hidden_service(
         onion_address
     );
 
-    // Wait for the service to be reachable with timeout
     let mut status_events = service.status_events();
 
-    tokio::select! {
-        biased;
-        _ = shutdown_signal.notified() => {
-            drop(service);
-            return;
+    while let Some(status) = status_events.next().await {
+        if status.state().is_fully_reachable() {
+            println!(
+                "✓ Tor hidden service is now fully reachable at http://{}",
+                onion_address
+            );
+            break;
         }
-        Some(status) = status_events.next() => {
-            if status.state().is_fully_reachable() {
-                println!("✓ Tor hidden service is now fully reachable at http://{}", onion_address);
-            }
-        }
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        status_events = service.status_events();
     }
 
     let stream_requests = tor_hsservice::handle_rend_requests(request_stream);
