@@ -89,12 +89,12 @@ pub async fn search_localities(
                     Err(_) => 0,
                 };
 
-                let onion_link = onion_address.map(|address| {
-                    format!(
-                        "http://{}/countries/{}/localities/{}/pmtiles",
-                        address, country_code_for_async, id
-                    )
-                });
+                let onion_link = format!(
+                    "http://{}/countries/{}/localities/{}/pmtiles",
+                    onion_address.unwrap(),
+                    country_code_for_async,
+                    id
+                );
 
                 LocalityInfo {
                     id,
