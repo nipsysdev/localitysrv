@@ -2,7 +2,7 @@
 name = "localitysrv"
 version = "0.1.0"
 edition = "2021"
-description = "HTTP server built with Rust and Axum that serves .pmtiles for localities from around the world."
+description = "HTTP server built with Rust, Arti/Tor and Axum that serves .pmtiles for localities from around the world."
 authors = ["Xavier Saliniere <bonjour@xaviers.sh>"]
 license = "GPL-3.0-or-later"
 
