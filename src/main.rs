@@ -12,6 +12,7 @@ use axum::{
     routing::{get, Router},
     Json,
 };
+use clap::Parser;
 use futures::StreamExt;
 use hyper::{body::Incoming, Request};
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -27,6 +28,7 @@ use tower::Service;
 use tower_http::cors::CorsLayer;
 
 mod api;
+mod cli;
 mod config;
 mod initialization;
 mod models;
@@ -45,6 +47,8 @@ pub struct AppState {
 async fn main() {
     tracing_subscriber::fmt::init();
 
+    let args = cli::Args::parse();
+
     let config = match Config::from_env() {
         Ok(config) => Arc::new(config),
         Err(e) => {
@@ -60,7 +64,7 @@ async fn main() {
         std::process::exit(1);
     }
 
-    if let Err(e) = ensure_database_is_present(&config).await {
+    if let Err(e) = ensure_database_is_present(&config, &args).await {
         eprintln!("Failed to ensure database is present: {}", e);
         std::process::exit(1);
     }
@@ -90,9 +94,14 @@ async fn main() {
 
     let extraction_service = Arc::new(ExtractionService::new(config.clone(), db_service.clone()));
 
-    if let Err(e) =
-        ensure_all_localities_present(&extraction_service, &country_service, &config, &db_service)
-            .await
+    if let Err(e) = ensure_all_localities_present(
+        &extraction_service,
+        &country_service,
+        &config,
+        &db_service,
+        &args,
+    )
+    .await
     {
         eprintln!("Failed to ensure all localities are present: {}", e);
         std::process::exit(1);

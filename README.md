@@ -81,6 +81,38 @@ Or using the release build:
 ./target/release/localitysrv
 ```
 
+## Command Line Options
+
+The server supports several command line options to control initialization behavior, particularly useful for automated deployments and non-interactive environments:
+
+### Options
+
+- `--non-interactive, -n`: Enable non-interactive mode (automatically downloads and extracts)
+- `--no-download`: Skip downloading the database if missing
+- `--no-extract`: Skip extracting missing localities
+- `--help, -h`: Show help message
+- `--version, -v`: Show version information
+
+### Usage Examples
+
+```bash
+# Fully automatic mode (download and extract without prompting)
+cargo run -- --non-interactive
+# or
+./target/release/localitysrv -n
+
+# Skip downloading database if missing (exit with error if database is missing)
+cargo run -- --no-download
+
+# Skip extracting localities if missing (continue with available data)
+cargo run -- --no-extract
+
+# Show help
+cargo run -- --help
+# or
+./target/release/localitysrv -h
+```
+
 ## Configuration
 
 The server is configured through environment variables. Create a `.env` file in the project root:

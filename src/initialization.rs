@@ -1,3 +1,4 @@
+use crate::cli::Args;
 use crate::config::Config;
 use crate::services::{
     country::CountryService, database::DatabaseService, extraction::ExtractionService,
@@ -6,6 +7,49 @@ use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::Path;
 
+async fn download_and_decompress_database(
+    config: &Config,
+    compressed_path: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("Downloading WhosOnFirst database...");
+    crate::utils::file::download_file_with_progress(
+        &config.whosonfirst_db_url,
+        Path::new(compressed_path),
+    )
+    .await?;
+    println!("Database download completed!");
+
+    println!("Decompressing database...");
+    let output =
+        crate::utils::cmd::run_command(&config.bzip2_cmd, &["-dv", compressed_path], None).await?;
+
+    if !output.stderr.is_empty() {
+        eprintln!("Decompression output: {}", output.stderr);
+    }
+
+    println!("Database decompressed successfully!");
+    Ok(())
+}
+
+async fn extract_missing_localities(
+    extraction_service: &ExtractionService,
+    results: Vec<(&String, &String, u32, u32, bool)>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let missing_country_codes: Vec<String> = results
+        .into_iter()
+        .filter(|(_, _, _, _, is_complete)| !is_complete)
+        .map(|(country_code, _, _, _, _)| (*country_code).clone())
+        .collect();
+
+    if !missing_country_codes.is_empty() {
+        extraction_service
+            .extract_localities(&missing_country_codes)
+            .await?;
+        println!("Extraction completed.");
+    }
+    Ok(())
+}
+
 pub async fn ensure_tools_are_present(tools: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
     use crate::utils::cmd::ensure_tools_are_present as check_tools;
 
@@ -13,7 +57,10 @@ pub async fn ensure_tools_are_present(tools: &[&str]) -> Result<(), Box<dyn std:
     Ok(())
 }
 
-pub async fn ensure_database_is_present(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn ensure_database_is_present(
+    config: &Config,
+    args: &Args,
+) -> Result<(), Box<dyn std::error::Error>> {
     let database_path = config.database_path();
     let compressed_path = format!("{}.bz2", database_path.display());
 
@@ -38,36 +85,25 @@ pub async fn ensure_database_is_present(config: &Config) -> Result<(), Box<dyn s
     }
 
     println!("WhosOnFirst database not found.");
-    print!("Do you want to download the WhosOnFirst database? This may take a while. (y/n) ");
-    io::stdout().flush()?;
 
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-
-    if input.trim().to_lowercase() != "y" {
-        println!("Database download skipped.");
+    if args.should_download_database() {
+        println!("Auto-downloading WhosOnFirst database...");
+        download_and_decompress_database(config, &compressed_path).await?;
         return Ok(());
+    } else if args.is_interactive_mode() {
+        print!("Do you want to download the WhosOnFirst database? This may take a while. (y/n) ");
+        std::io::stdout().flush()?;
+
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+
+        if input.trim().to_lowercase() == "y" {
+            download_and_decompress_database(config, &compressed_path).await?;
+            return Ok(());
+        }
     }
-
-    println!("Downloading WhosOnFirst database...");
-    crate::utils::file::download_file_with_progress(
-        &config.whosonfirst_db_url,
-        Path::new(&compressed_path),
-    )
-    .await?;
-    println!("Database download completed!");
-
-    println!("Decompressing database...");
-    let output =
-        crate::utils::cmd::run_command(&config.bzip2_cmd, &["-dv", &compressed_path], None).await?;
-
-    if !output.stderr.is_empty() {
-        eprintln!("Decompression output: {}", output.stderr);
-    }
-
-    println!("Database decompressed successfully!");
-
-    Ok(())
+    println!("Database download skipped.");
+    Err("Database is missing and download is disabled".into())
 }
 
 pub async fn ensure_all_localities_present(
@@ -75,6 +111,7 @@ pub async fn ensure_all_localities_present(
     country_service: &CountryService,
     config: &Config,
     db_service: &DatabaseService,
+    args: &Args,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("Checking localities extraction status...");
 
@@ -149,28 +186,23 @@ pub async fn ensure_all_localities_present(
 
     println!("✗ Some localities are missing. Extraction is incomplete.");
 
-    print!("Do you want to extract the missing localities? (y/n) ");
-    io::stdout().flush()?;
+    if args.should_extract_localities() {
+        println!("Auto-extracting missing localities...");
+        extract_missing_localities(extraction_service, results.clone()).await?;
+        return Ok(());
+    } else if args.is_interactive_mode() {
+        // Interactive mode - prompt the user
+        print!("Do you want to extract the missing localities? (y/n) ");
+        io::stdout().flush()?;
 
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
 
-    if input.trim().to_lowercase() == "y" {
-        let missing_country_codes: Vec<String> = results
-            .into_iter()
-            .filter(|(_, _, _, _, is_complete)| !is_complete)
-            .map(|(country_code, _, _, _, _)| country_code.clone())
-            .collect();
-
-        if !missing_country_codes.is_empty() {
-            extraction_service
-                .extract_localities(&missing_country_codes)
-                .await?;
-            println!("Extraction completed.");
+        if input.trim().to_lowercase() == "y" {
+            extract_missing_localities(extraction_service, results.clone()).await?;
+            return Ok(());
         }
-    } else {
-        println!("Extraction skipped.");
     }
-
+    println!("Extraction skipped.");
     Ok(())
 }
