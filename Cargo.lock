@@ -2348,6 +2348,7 @@ dependencies = [
  "tor-proto",
  "tower",
  "tower-http",
+ "tracing",
  "tracing-subscriber",
 ]
 
