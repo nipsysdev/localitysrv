@@ -15,6 +15,7 @@ use clap::Parser;
 use reqwest::StatusCode;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
+use tracing::error;
 
 mod api;
 mod cli;
@@ -41,7 +42,7 @@ async fn main() {
     let config = match Config::from_env() {
         Ok(config) => Arc::new(config),
         Err(e) => {
-            eprintln!("Failed to load configuration: {}", e);
+            error!("Failed to load configuration: {}", e);
             std::process::exit(1);
         }
     };
@@ -49,12 +50,12 @@ async fn main() {
     if let Err(e) =
         ensure_tools_are_present(&[&config.pmtiles_cmd, &config.bzip2_cmd, &config.find_cmd]).await
     {
-        eprintln!("Failed to ensure tools are present: {}", e);
+        error!("Failed to ensure tools are present: {}", e);
         std::process::exit(1);
     }
 
     if let Err(e) = ensure_database_is_present(&config, &args).await {
-        eprintln!("Failed to ensure database is present: {}", e);
+        error!("Failed to ensure database is present: {}", e);
         std::process::exit(1);
     }
 
@@ -68,7 +69,7 @@ async fn main() {
     {
         Ok(service) => Arc::new(service),
         Err(e) => {
-            eprintln!("Failed to initialize database service: {}", e);
+            error!("Failed to initialize database service: {}", e);
             std::process::exit(1);
         }
     };
@@ -76,7 +77,7 @@ async fn main() {
     let country_service = match CountryService::new(&config.country_codes_path()).await {
         Ok(service) => Arc::new(service),
         Err(e) => {
-            eprintln!("Failed to initialize country service: {}", e);
+            error!("Failed to initialize country service: {}", e);
             std::process::exit(1);
         }
     };
@@ -92,7 +93,7 @@ async fn main() {
     )
     .await
     {
-        eprintln!("Failed to ensure all localities are present: {}", e);
+        error!("Failed to ensure all localities are present: {}", e);
         std::process::exit(1);
     }
 
@@ -148,7 +149,7 @@ async fn main() {
     let onion_address = match onion_address_rx.await {
         Ok(address) => address,
         Err(_) => {
-            tracing::error!("Failed to get onion address from Tor hidden service");
+            error!("Failed to get onion address from Tor hidden service");
             return;
         }
     };
@@ -190,11 +191,9 @@ async fn run_axum_server(
             listener
         }
         Err(e) => {
-            tracing::error!(
+            error!(
                 "TCP listener: Failed to bind to {}:{}: {}",
-                address,
-                port,
-                e
+                address, port, e
             );
             return;
         }
@@ -214,7 +213,7 @@ async fn run_axum_server(
             tracing::info!("Axum server stopped successfully");
         }
         Err(e) => {
-            tracing::error!("Axum server error: {}", e);
+            error!("Axum server error: {}", e);
         }
     }
 }

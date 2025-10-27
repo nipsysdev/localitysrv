@@ -1,6 +1,7 @@
 use crate::models::locality::Locality;
 use crate::utils::file::FileError;
 use rusqlite::Connection;
+use tracing::info;
 use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
@@ -132,14 +133,14 @@ impl DatabaseService {
         let compressed_path = Path::new(&compressed_path);
 
         if !compressed_path.exists() {
-            println!("Downloading WhosOnFirst database...");
+            info!("Downloading WhosOnFirst database...");
 
             crate::utils::file::download_file_with_progress(
                 &self.whosonfirst_db_url,
                 compressed_path,
             )
             .await?;
-            println!("Database download completed!");
+            info!("Database download completed!");
         }
 
         Ok(())
@@ -151,7 +152,7 @@ impl DatabaseService {
         let database_path = Path::new(&self.database_path);
 
         if compressed_path.exists() && !database_path.exists() {
-            println!("Decompressing database...");
+            info!("Decompressing database...");
 
             let output = crate::utils::cmd::run_command(
                 &self.bzip2_cmd,
@@ -161,10 +162,10 @@ impl DatabaseService {
             .await?;
 
             if !output.stderr.is_empty() {
-                eprintln!("Decompression output: {}", output.stderr);
+                tracing::error!("Decompression output: {}", output.stderr);
             }
 
-            println!("Database decompressed successfully!");
+            info!("Database decompressed successfully!");
         }
 
         Ok(())

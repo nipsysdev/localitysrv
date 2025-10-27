@@ -6,28 +6,29 @@ use crate::services::{
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::Path;
+use tracing::{info, warn};
 
 async fn download_and_decompress_database(
     config: &Config,
     compressed_path: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Downloading WhosOnFirst database...");
+    info!("Downloading WhosOnFirst database...");
     crate::utils::file::download_file_with_progress(
         &config.whosonfirst_db_url,
         Path::new(compressed_path),
     )
     .await?;
-    println!("Database download completed!");
+    info!("Database download completed!");
 
-    println!("Decompressing database...");
+    info!("Decompressing database...");
     let output =
         crate::utils::cmd::run_command(&config.bzip2_cmd, &["-dv", compressed_path], None).await?;
 
     if !output.stderr.is_empty() {
-        eprintln!("Decompression output: {}", output.stderr);
+        warn!("Decompression output: {}", output.stderr);
     }
 
-    println!("Database decompressed successfully!");
+    info!("Database decompressed successfully!");
     Ok(())
 }
 
@@ -45,7 +46,7 @@ async fn extract_missing_localities(
         extraction_service
             .extract_localities(&missing_country_codes)
             .await?;
-        println!("Extraction completed.");
+        info!("Extraction completed.");
     }
     Ok(())
 }
@@ -65,29 +66,29 @@ pub async fn ensure_database_is_present(
     let compressed_path = format!("{}.bz2", database_path.display());
 
     if database_path.exists() {
-        println!("Database already present.");
+        info!("Database already present.");
         return Ok(());
     }
 
     if Path::new(&compressed_path).exists() {
-        println!("Compressed database found, decompressing...");
+        info!("Compressed database found, decompressing...");
 
         let output =
             crate::utils::cmd::run_command(&config.bzip2_cmd, &["-dv", &compressed_path], None)
                 .await?;
 
         if !output.stderr.is_empty() {
-            eprintln!("Decompression output: {}", output.stderr);
+            warn!("Decompression output: {}", output.stderr);
         }
 
-        println!("Database decompressed successfully!");
+        info!("Database decompressed successfully!");
         return Ok(());
     }
 
-    println!("WhosOnFirst database not found.");
+    info!("WhosOnFirst database not found.");
 
     if args.should_download_database() {
-        println!("Auto-downloading WhosOnFirst database...");
+        info!("Auto-downloading WhosOnFirst database...");
         download_and_decompress_database(config, &compressed_path).await?;
         return Ok(());
     } else if args.is_interactive_mode() {
@@ -102,7 +103,7 @@ pub async fn ensure_database_is_present(
             return Ok(());
         }
     }
-    println!("Database download skipped.");
+    info!("Database download skipped.");
     Err("Database is missing and download is disabled".into())
 }
 
@@ -113,21 +114,21 @@ pub async fn ensure_all_localities_present(
     db_service: &DatabaseService,
     args: &Args,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Checking localities extraction status...");
+    info!("Checking localities extraction status...");
 
     let countries_to_check = country_service.get_countries_to_process(&config.target_countries);
 
     if countries_to_check.is_empty() {
-        println!("No countries to process");
+        info!("No countries to process");
         return Ok(());
     }
 
-    println!("Counting pmtiles files...");
+    info!("Counting pmtiles files...");
     let file_count_map = extraction_service
         .batch_get_pmtiles_file_count(&countries_to_check)
         .await?;
 
-    println!("Querying database for locality counts...");
+    info!("Querying database for locality counts...");
     let mut db_count_map = HashMap::new();
 
     for country_code in &countries_to_check {
@@ -160,12 +161,12 @@ pub async fn ensure_all_localities_present(
     }
 
     if all_complete {
-        println!("✓ All localities have been extracted!");
+        info!("✓ All localities have been extracted!");
         return Ok(());
     }
 
-    println!("Country Code | Country Name                  | DB Count | File Count | Status");
-    println!("-------------|-------------------------------|----------|------------|--------");
+    info!("Country Code | Country Name                  | DB Count | File Count | Status");
+    info!("-------------|-------------------------------|----------|------------|--------");
 
     for (country_code, country_name, db_count, file_count, is_complete) in &results {
         let status = if *is_complete {
@@ -178,16 +179,16 @@ pub async fn ensure_all_localities_present(
         } else {
             country_name.to_string()
         };
-        println!(
+        info!(
             "{:12} | {:29} | {:8} | {:10} | {}",
             country_code, truncated_name, db_count, file_count, status
         );
     }
 
-    println!("✗ Some localities are missing. Extraction is incomplete.");
+    warn!("✗ Some localities are missing. Extraction is incomplete.");
 
     if args.should_extract_localities() {
-        println!("Auto-extracting missing localities...");
+        info!("Auto-extracting missing localities...");
         extract_missing_localities(extraction_service, results.clone()).await?;
         return Ok(());
     } else if args.is_interactive_mode() {
@@ -203,6 +204,6 @@ pub async fn ensure_all_localities_present(
             return Ok(());
         }
     }
-    println!("Extraction skipped.");
+    info!("Extraction skipped.");
     Ok(())
 }

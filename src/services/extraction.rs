@@ -8,6 +8,7 @@ use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::Semaphore;
+use tracing::{error, info};
 
 #[derive(Error, Debug)]
 pub enum ExtractionError {
@@ -45,7 +46,7 @@ impl ExtractionService {
         if let Some(ref local_path) = self.config.planet_pmtiles_path {
             let path = Path::new(local_path);
             if path.exists() {
-                println!("Using local planet pmtiles file: {}", local_path);
+                info!("Using local planet pmtiles file: {}", local_path);
                 return Ok(local_path.clone());
             } else {
                 return Err(ExtractionError::PlanetUrlFailed(format!(
@@ -56,7 +57,7 @@ impl ExtractionService {
         }
 
         // Fall back to fetching the remote URL
-        println!("Fetching latest planet pmtiles URL...");
+        info!("Fetching latest planet pmtiles URL...");
 
         let response = reqwest::get(&self.config.protomaps_builds_url)
             .await
@@ -92,7 +93,7 @@ impl ExtractionService {
             .ok_or_else(|| ExtractionError::PlanetUrlFailed("Build has no key".to_string()))?;
 
         let url = format!("https://build.protomaps.com/{}", key);
-        println!("Latest planet pmtiles URL: {}", url);
+        info!("Latest planet pmtiles URL: {}", url);
 
         Ok(url)
     }
@@ -106,7 +107,7 @@ impl ExtractionService {
         let output_path = country_dir.join(format!("{}.pmtiles", locality.id));
 
         if output_path.exists() {
-            println!("Skipping existing file: {}", output_path.display());
+            info!("Skipping existing file: {}", output_path.display());
             return Ok(());
         }
 
@@ -125,23 +126,23 @@ impl ExtractionService {
             &format!("--bbox={}", bbox),
         ];
 
-        println!("Extracting locality {} with bbox: {}", locality.id, bbox);
-        println!("Command: {} {}", &self.config.pmtiles_cmd, args.join(" "));
+        info!("Extracting locality {} with bbox: {}", locality.id, bbox);
+        info!("Command: {} {}", &self.config.pmtiles_cmd, args.join(" "));
 
         let output = run_command(&self.config.pmtiles_cmd, args, None).await?;
 
         if !output.stdout.is_empty() {
-            println!("Extraction output for {}: {}", locality.id, output.stdout);
+            info!("Extraction output for {}: {}", locality.id, output.stdout);
         }
 
         if !output.stderr.is_empty() {
-            eprintln!("Extraction error for {}: {}", locality.id, output.stderr);
+            error!("Extraction error for {}: {}", locality.id, output.stderr);
         }
 
         if output_path.exists() {
-            println!("Successfully created file: {}", output_path.display());
+            info!("Successfully created file: {}", output_path.display());
         } else {
-            eprintln!("Failed to create file: {}", output_path.display());
+            error!("Failed to create file: {}", output_path.display());
             return Err(ExtractionError::ExtractionFailed(format!(
                 "Failed to create PMTiles file for locality {}",
                 locality.id
@@ -158,7 +159,7 @@ impl ExtractionService {
         let planet_url = self.get_planet_pmtiles_source().await?;
 
         for country_code in country_codes {
-            println!("Processing country: {}", country_code);
+            info!("Processing country: {}", country_code);
 
             let country_dir = self.config.localities_dir().join(country_code);
             ensure_dir_exists(&country_dir)?;
@@ -170,11 +171,11 @@ impl ExtractionService {
                 .map_err(|e| ExtractionError::DatabaseError(e.to_string()))?;
 
             if localities.is_empty() {
-                println!("No localities found for country: {}", country_code);
+                info!("No localities found for country: {}", country_code);
                 continue;
             }
 
-            println!(
+            info!(
                 "Found {} localities for country: {}",
                 localities.len(),
                 country_code
@@ -192,14 +193,14 @@ impl ExtractionService {
             let remaining_count = total_count - existing_count;
 
             if remaining_count == 0 {
-                println!(
+                info!(
                     "All {} localities already exist for country: {}",
                     total_count, country_code
                 );
                 continue;
             }
 
-            println!(
+            info!(
                 "Progress: {}/{} localities already exist, {} remaining to extract",
                 existing_count, total_count, remaining_count
             );
@@ -226,8 +227,8 @@ impl ExtractionService {
                         let current =
                             completed_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         // Use carriage return to overwrite the line
-                        eprint!(
-                            "\n\rProgress: {}/{} localities extracted for {}\n\n",
+                        info!(
+                            "Progress: {}/{} localities extracted for {}",
                             current + 1,
                             total_count,
                             locality.country
@@ -247,11 +248,11 @@ impl ExtractionService {
                 match result {
                     Ok(Ok(())) => {} // Success
                     Ok(Err(e)) => {
-                        eprintln!("Extraction task failed: {}", e);
+                        error!("Extraction task failed: {}", e);
                         has_errors = true;
                     }
                     Err(e) => {
-                        eprintln!("Extraction task panicked: {:?}", e);
+                        error!("Extraction task panicked: {:?}", e);
                         has_errors = true;
                     }
                 }

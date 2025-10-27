@@ -5,6 +5,7 @@ use std::path::Path;
 use thiserror::Error;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
+use tracing::info;
 
 #[derive(Error, Debug)]
 pub enum FileError {
@@ -42,18 +43,16 @@ pub async fn download_file_with_progress(url: &str, destination: &Path) -> Resul
 
         if total_size > 0 {
             let percent = (downloaded as f64 / total_size as f64) * 100.0;
-            print!(
-                "\rDownload progress: {:.2}% ({:.2} MB / {:.2} MB)",
+            info!(
+                "Download progress: {:.2}% ({:.2} MB / {:.2} MB)",
                 percent,
                 downloaded as f64 / 1_048_576.0,
                 total_size as f64 / 1_048_576.0
             );
-            use std::io::Write;
-            std::io::stdout().flush().unwrap();
         }
     }
 
-    println!();
+    info!("");
 
     Ok(())
 }
