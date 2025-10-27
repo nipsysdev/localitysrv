@@ -119,7 +119,7 @@ The server is configured through environment variables. Create a `.env` file in 
 
 ```env
 # Server Configuration
-SERVER_PORT=8080
+SERVER_PORT=8000
 ASSETS_DIR=./assets
 
 # Command-line Tool Paths
@@ -149,7 +149,7 @@ DB_CONNECTION_POOL_SIZE=10
 
 ### Configuration Options
 
-- `SERVER_PORT`: Port for the HTTP server (default: 8080)
+- `SERVER_PORT`: Port for the HTTP server (default: 8000)
 - `ASSETS_DIR`: Directory for storing assets (default: ./assets)
 - `PMTILES_CMD`: Path to the pmtiles command-line tool (default: pmtiles)
 - `BZIP2_CMD`: Path to the bzip2 command-line tool (default: bzip2)
@@ -315,18 +315,18 @@ The server runs simultaneously in two modes:
 
 ### Local HTTP Server
 
-The local HTTP server starts automatically when the application launches. By default, it listens on port 8080, but this can be configured via the `SERVER_PORT` environment variable.
+The local HTTP server starts automatically when the application launches. By default, it listens on port 8000, but this can be configured via the `SERVER_PORT` environment variable.
 
 ```
-✓ TCP listener binded to http://127.0.0.1:8080
+✓ TCP listener binded to http://127.0.0.1:8000
 ```
 
 You can access all API endpoints locally:
 
 ```
-http://127.0.0.1:8080/countries
-http://127.0.0.1:8080/countries/AE/localities
-http://127.0.0.1:8080/countries/AE/localities/85632721/pmtiles
+http://127.0.0.1:8000/countries
+http://127.0.0.1:8000/countries/AE/localities
+http://127.0.0.1:8000/countries/AE/localities/85632721/pmtiles
 ```
 
 ### Tor Hidden Service
