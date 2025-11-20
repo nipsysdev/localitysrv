@@ -5,8 +5,6 @@ use tokio::process::Command as TokioCommand;
 
 #[derive(Error, Debug)]
 pub enum CmdError {
-    #[error("Command execution failed: {0}")]
-    ExecutionFailed(String),
     #[error("Command not found: {0}")]
     CommandNotFound(String),
     #[error("IO error: {0}")]

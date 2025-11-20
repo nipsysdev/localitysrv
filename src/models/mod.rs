@@ -1,3 +1,3 @@
 pub mod country;
 pub mod locality;
-pub mod response;
+pub mod storage;

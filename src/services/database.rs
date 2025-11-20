@@ -1,22 +1,11 @@
 use crate::models::locality::Locality;
-use crate::utils::file::FileError;
 use rusqlite::Connection;
-use tracing::info;
-use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::Mutex;
 
 #[derive(Error, Debug)]
 pub enum DatabaseError {
-    #[error("Database connection failed: {0}")]
-    ConnectionFailed(String),
-    #[error("Query failed: {0}")]
-    QueryFailed(String),
-    #[error("Database download failed: {0}")]
-    DownloadFailed(String),
-    #[error("Database decompression failed: {0}")]
-    DecompressionFailed(String),
     #[error("Rusqlite error: {0}")]
     RusqliteError(#[from] rusqlite::Error),
     #[error("Tokio join error: {0}")]
@@ -24,35 +13,27 @@ pub enum DatabaseError {
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
     #[error("File error: {0}")]
-    FileError(#[from] FileError),
+    FileError(#[from] crate::utils::file::FileError),
     #[error("Command error: {0}")]
     CmdError(#[from] crate::utils::cmd::CmdError),
 }
 
 pub struct DatabaseService {
     conn: Arc<Mutex<Connection>>,
-    database_path: String,
-    whosonfirst_db_url: String,
-    bzip2_cmd: String,
 }
 
 impl DatabaseService {
-    pub async fn new(
-        _database_url: &str,
-        database_path: &str,
-        whosonfirst_db_url: &str,
-        bzip2_cmd: &str,
-    ) -> Result<Self, DatabaseError> {
+    pub async fn new(database_path: &str) -> Result<Self, DatabaseError> {
         let conn = Connection::open(database_path)?;
 
         let service = Self {
             conn: Arc::new(Mutex::new(conn)),
-            database_path: database_path.to_string(),
-            whosonfirst_db_url: whosonfirst_db_url.to_string(),
-            bzip2_cmd: bzip2_cmd.to_string(),
         };
 
-        service.create_optimized_indexes().await?;
+        // Only create CID table if this is not a WhosOnFirst database
+        if !database_path.contains("whosonfirst") {
+            service.create_optimized_indexes().await?;
+        }
 
         Ok(service)
     }
@@ -63,201 +44,30 @@ impl DatabaseService {
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
 
-            // Index for countries query
-            let create_countries_index = r#"
-            CREATE INDEX IF NOT EXISTS spr_countries_query_idx
-            ON spr (placetype, is_current, is_deprecated, country)
-            WHERE placetype = 'locality' AND is_current = 1 AND is_deprecated = 0
+            // Create CID mapping table
+            let create_cid_table = r#"
+            CREATE TABLE IF NOT EXISTS locality_cids (
+                country_code TEXT NOT NULL,
+                locality_id INTEGER NOT NULL,
+                cid TEXT NOT NULL,
+                upload_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                file_size INTEGER,
+                PRIMARY KEY (country_code, locality_id)
+            )
             "#;
 
-            // Index for country count query
-            let create_country_count_index = r#"
-            CREATE INDEX IF NOT EXISTS spr_country_count_query_idx
-            ON spr (placetype, is_current, is_deprecated, country)
-            WHERE placetype = 'locality' AND is_current = 1 AND is_deprecated = 0
+            // Index for fast CID lookups
+            let create_cid_index = r#"
+            CREATE INDEX IF NOT EXISTS idx_locality_cids_lookup
+            ON locality_cids(country_code, locality_id)
             "#;
 
-            // Index for localities pagination queries
-            let create_pagination_index = r#"
-            CREATE INDEX IF NOT EXISTS spr_localities_pagination_idx
-            ON spr (placetype, is_current, is_deprecated, country, name)
-            WHERE placetype = 'locality' AND is_current = 1 AND is_deprecated = 0
-            "#;
-
-            // Index for localities search queries (case-insensitive)
-            let create_search_index = r#"
-            CREATE INDEX IF NOT EXISTS spr_localities_search_idx
-            ON spr (placetype, is_current, is_deprecated, country, name COLLATE NOCASE)
-            WHERE placetype = 'locality' AND is_current = 1 AND is_deprecated = 0
-            "#;
-
-            // Index for localities count queries
-            let create_count_index = r#"
-            CREATE INDEX IF NOT EXISTS spr_localities_count_idx
-            ON spr (placetype, is_current, is_deprecated, country)
-            WHERE placetype = 'locality' AND is_current = 1 AND is_deprecated = 0
-            "#;
-
-            // Index for localities search count queries (case-insensitive)
-            let create_search_count_index = r#"
-            CREATE INDEX IF NOT EXISTS spr_localities_search_count_idx
-            ON spr (placetype, is_current, is_deprecated, country, name COLLATE NOCASE)
-            WHERE placetype = 'locality' AND is_current = 1 AND is_deprecated = 0
-            "#;
-
-            conn.execute(create_countries_index, [])?;
-            conn.execute(create_country_count_index, [])?;
-            conn.execute(create_pagination_index, [])?;
-            conn.execute(create_search_index, [])?;
-            conn.execute(create_count_index, [])?;
-            conn.execute(create_search_count_index, [])?;
+            conn.execute(create_cid_table, [])?;
+            conn.execute(create_cid_index, [])?;
 
             Ok::<(), DatabaseError>(())
         })
         .await?
-    }
-
-    pub async fn ensure_database_present(&self) -> Result<(), DatabaseError> {
-        let path = Path::new(&self.database_path);
-
-        if !path.exists() {
-            self.download_database().await?;
-            self.decompress_database().await?;
-        }
-
-        Ok(())
-    }
-
-    pub async fn download_database(&self) -> Result<(), DatabaseError> {
-        let compressed_path = format!("{}.bz2", self.database_path);
-        let compressed_path = Path::new(&compressed_path);
-
-        if !compressed_path.exists() {
-            info!("Downloading WhosOnFirst database...");
-
-            crate::utils::file::download_file_with_progress(
-                &self.whosonfirst_db_url,
-                compressed_path,
-            )
-            .await?;
-            info!("Database download completed!");
-        }
-
-        Ok(())
-    }
-
-    pub async fn decompress_database(&self) -> Result<(), DatabaseError> {
-        let compressed_path = format!("{}.bz2", self.database_path);
-        let compressed_path = Path::new(&compressed_path);
-        let database_path = Path::new(&self.database_path);
-
-        if compressed_path.exists() && !database_path.exists() {
-            info!("Decompressing database...");
-
-            let output = crate::utils::cmd::run_command(
-                &self.bzip2_cmd,
-                &["-dv", &compressed_path.to_string_lossy()],
-                None,
-            )
-            .await?;
-
-            if !output.stderr.is_empty() {
-                tracing::error!("Decompression output: {}", output.stderr);
-            }
-
-            info!("Database decompressed successfully!");
-        }
-
-        Ok(())
-    }
-
-    pub async fn get_localities_count(
-        &self,
-        country_code: &str,
-        query: Option<&str>,
-    ) -> Result<u32, DatabaseError> {
-        let conn = self.conn.clone();
-        let country_code = country_code.to_string();
-        let query_param = query.map(|q| format!("{}%", q));
-
-        tokio::task::spawn_blocking(move || {
-            let conn = conn.blocking_lock();
-
-            let conditions = [
-                "placetype = 'locality'",
-                "is_current = 1",
-                "is_deprecated = 0",
-                "country = ?1",
-            ];
-
-            let where_clause = conditions.join(" AND ");
-
-            let count = if let Some(q) = query_param {
-                let search_query = format!(
-                    "SELECT COUNT(*) as count FROM spr WHERE {} AND name LIKE ?2 COLLATE NOCASE",
-                    where_clause
-                );
-                conn.query_row(&search_query, [&country_code, &q], |row| {
-                    row.get::<_, i64>(0)
-                })
-            } else {
-                let query_str = format!("SELECT COUNT(*) as count FROM spr WHERE {}", where_clause);
-                conn.query_row(&query_str, [&country_code], |row| row.get::<_, i64>(0))
-            };
-
-            Ok(count.map(|c| c as u32)?)
-        })
-        .await?
-    }
-
-    pub async fn get_localities(
-        &self,
-        country_code: &str,
-        page: u32,
-        limit: u32,
-        query: Option<&str>,
-    ) -> Result<Vec<Locality>, DatabaseError> {
-        let conn = self.conn.clone();
-        let country_code = country_code.to_string();
-        let query_param = query.map(|q| format!("{}%", q));
-        let offset = (page - 1) * limit;
-
-        tokio::task::spawn_blocking(move || {
-            let conn = conn.blocking_lock();
-            
-            let conditions = [
-                "placetype = 'locality'",
-                "is_current = 1",
-                "is_deprecated = 0",
-                "country = ?1",
-            ];
-
-            let where_clause = conditions.join(" AND ");
-
-            let localities = if let Some(q) = query_param {
-                let search_query = format!(
-                    "SELECT id, name, country, placetype, latitude, longitude, min_longitude, min_latitude, max_longitude, max_latitude FROM spr WHERE {} AND name LIKE ?2 COLLATE NOCASE ORDER BY name COLLATE NOCASE ASC LIMIT ?3 OFFSET ?4",
-                    where_clause
-                );
-                let mut stmt = conn.prepare(&search_query)?;
-                let rows = stmt.query_map([&country_code, &q, &limit.to_string(), &offset.to_string()], |row| {
-                    Locality::from_row(row)
-                })?;
-                rows.collect::<Result<Vec<_>, _>>()?
-            } else {
-                let paginated_query = format!(
-                    "SELECT id, name, country, placetype, latitude, longitude, min_longitude, min_latitude, max_longitude, max_latitude FROM spr WHERE {} ORDER BY name ASC LIMIT ?2 OFFSET ?3",
-                    where_clause
-                );
-                let mut stmt = conn.prepare(&paginated_query)?;
-                let rows = stmt.query_map([&country_code, &limit.to_string(), &offset.to_string()], |row| {
-                    Locality::from_row(row)
-                })?;
-                rows.collect::<Result<Vec<_>, _>>()?
-            };
-
-            Ok(localities)
-        }).await?
     }
 
     pub async fn get_country_localities(
@@ -326,56 +136,102 @@ impl DatabaseService {
         }).await?
     }
 
-    pub async fn get_countries_locality_counts(
-        &self,
-        country_codes: &[String],
-    ) -> Result<std::collections::HashMap<String, u32>, DatabaseError> {
-        if country_codes.is_empty() {
-            return Ok(std::collections::HashMap::new());
-        }
-
+    /// Get a specific locality by ID
+    pub async fn get_locality_by_id(&self, locality_id: i64) -> Result<Option<Locality>, DatabaseError> {
         let conn = self.conn.clone();
-        let country_codes = country_codes.to_vec();
 
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             
-            let conditions = [
-                "placetype = 'locality'",
-                "is_current = 1",
-                "is_deprecated = 0",
-            ];
+            let query = r#"
+            SELECT id, name, country, placetype, latitude, longitude, min_longitude, min_latitude, max_longitude, max_latitude
+            FROM spr
+            WHERE id = ?1 AND placetype = 'locality' AND is_current = 1 AND is_deprecated = 0
+            "#;
 
-            let base_where_clause = conditions.join(" AND ");
-
-            let placeholders: Vec<_> = country_codes.iter().map(|_| "?").collect();
-            let in_clause = format!("country IN ({})", placeholders.join(","));
-
-            let where_clause = format!("{} AND {}", base_where_clause, in_clause);
-            let query_str = format!(
-                "SELECT country, COUNT(*) as count FROM spr WHERE {} GROUP BY country",
-                where_clause
-            );
-
-            let mut stmt = conn.prepare(&query_str)?;
-            
-            // Create parameter values
-            let params: Vec<&dyn rusqlite::ToSql> = country_codes
-                .iter()
-                .map(|s| s as &dyn rusqlite::ToSql)
-                .collect();
-            
-            let rows = stmt.query_map(params.as_slice(), |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            let mut stmt = conn.prepare(query)?;
+            let rows = stmt.query_map([&locality_id], |row| {
+                Locality::from_row(row)
             })?;
             
-            let mut counts = std::collections::HashMap::new();
-            for row in rows {
-                let (country, count) = row?;
-                counts.insert(country, count as u32);
+            // Collect the first result (if any)
+            let localities: Result<Vec<_>, _> = rows.collect();
+            match localities {
+                Ok(locality_vec) => Ok(locality_vec.into_iter().next()),
+                Err(e) => Err(DatabaseError::RusqliteError(e)),
+            }
+        }).await?
+    }
+
+    /// Batch insert CID mappings
+    pub async fn batch_insert_cid_mappings(
+        &self,
+        mappings: &[(String, u32, String, u64)],
+    ) -> Result<(), DatabaseError> {
+        let conn = self.conn.clone();
+        let mappings = mappings.to_vec();
+
+        tokio::task::spawn_blocking(move || {
+            let mut conn = conn.blocking_lock();
+            
+            let tx = conn.transaction()?;
+            
+            let query = r#"
+            INSERT OR REPLACE INTO locality_cids
+            (country_code, locality_id, cid, file_size, upload_time)
+            VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)
+            "#;
+
+            for (country_code, locality_id, cid, file_size) in mappings {
+                tx.execute(query, [&country_code as &dyn rusqlite::ToSql, &locality_id as &dyn rusqlite::ToSql, &cid as &dyn rusqlite::ToSql, &file_size as &dyn rusqlite::ToSql])?;
             }
 
-            Ok(counts)
+            tx.commit()?;
+            Ok(())
+        }).await?
+    }
+
+    /// Check if a locality already has a CID mapping
+    pub async fn has_cid_mapping(
+        &self,
+        country_code: &str,
+        locality_id: u32,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self.conn.clone();
+        let country_code = country_code.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            
+            let query = r#"
+            SELECT COUNT(*) as count FROM locality_cids
+            WHERE country_code = ?1 AND locality_id = ?2
+            "#;
+
+            let count = conn.query_row(query, [&country_code as &dyn rusqlite::ToSql, &locality_id as &dyn rusqlite::ToSql], |row| {
+                row.get::<_, i64>(0)
+            })?;
+
+            Ok(count > 0)
+        }).await?
+    }
+
+    /// Get CID mapping statistics
+    pub async fn get_cid_mapping_stats(&self) -> Result<(u64, u64), DatabaseError> {
+        let conn = self.conn.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            
+            // Get total mappings count
+            let total_query = "SELECT COUNT(*) as count FROM locality_cids";
+            let total_count = conn.query_row(total_query, [], |row| row.get::<_, i64>(0))?;
+            
+            // Get unique countries count
+            let countries_query = "SELECT COUNT(DISTINCT country_code) as count FROM locality_cids";
+            let countries_count = conn.query_row(countries_query, [], |row| row.get::<_, i64>(0))?;
+            
+            Ok((total_count as u64, countries_count as u64))
         }).await?
     }
 }

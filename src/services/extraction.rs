@@ -1,4 +1,4 @@
-use crate::config::Config;
+use crate::config::LocalitySrvConfig;
 use crate::models::locality::Locality;
 use crate::utils::cmd::{run_command, CmdError};
 use crate::utils::file::{ensure_dir_exists, FileError};
@@ -16,10 +16,6 @@ pub enum ExtractionError {
     PlanetUrlFailed(String),
     #[error("Extraction failed: {0}")]
     ExtractionFailed(String),
-    #[error("File operation failed: {0}")]
-    FileOperationFailed(String),
-    #[error("Command execution failed: {0}")]
-    CommandFailed(String),
     #[error("Database error: {0}")]
     DatabaseError(String),
     #[error("IO error: {0}")]
@@ -32,12 +28,15 @@ pub enum ExtractionError {
 
 #[derive(Clone)]
 pub struct ExtractionService {
-    config: Arc<Config>,
+    config: Arc<LocalitySrvConfig>,
     db_service: Arc<super::database::DatabaseService>,
 }
 
 impl ExtractionService {
-    pub fn new(config: Arc<Config>, db_service: Arc<super::database::DatabaseService>) -> Self {
+    pub fn new(
+        config: Arc<LocalitySrvConfig>,
+        db_service: Arc<super::database::DatabaseService>,
+    ) -> Self {
         Self { config, db_service }
     }
 
@@ -56,46 +55,10 @@ impl ExtractionService {
             }
         }
 
-        // Fall back to fetching the remote URL
-        info!("Fetching latest planet pmtiles URL...");
-
-        let response = reqwest::get(&self.config.protomaps_builds_url)
-            .await
-            .map_err(|e| {
-                ExtractionError::PlanetUrlFailed(format!("Failed to fetch builds: {}", e))
-            })?;
-
-        if !response.status().is_success() {
-            return Err(ExtractionError::PlanetUrlFailed(format!(
-                "Failed to fetch builds: {}",
-                response.status()
-            )));
-        }
-
-        let builds: Vec<serde_json::Value> = response.json().await.map_err(|e| {
-            ExtractionError::PlanetUrlFailed(format!("Failed to parse builds: {}", e))
-        })?;
-
-        if builds.is_empty() {
-            return Err(ExtractionError::PlanetUrlFailed(
-                "No builds found".to_string(),
-            ));
-        }
-
-        let latest_build = builds
-            .iter()
-            .max_by_key(|build| build.get("uploaded").and_then(|v| v.as_str()).unwrap_or(""))
-            .ok_or_else(|| ExtractionError::PlanetUrlFailed("No valid builds found".to_string()))?;
-
-        let key = latest_build
-            .get("key")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ExtractionError::PlanetUrlFailed("Build has no key".to_string()))?;
-
-        let url = format!("https://build.protomaps.com/{}", key);
-        info!("Latest planet pmtiles URL: {}", url);
-
-        Ok(url)
+        // No HTTP fetching in decentralized mode - require local file
+        Err(ExtractionError::PlanetUrlFailed(
+            "No local planet pmtiles file configured. Set PLANET_PMTILES_PATH environment variable.".to_string()
+        ))
     }
 
     pub async fn extract_locality(
@@ -161,7 +124,7 @@ impl ExtractionService {
         for country_code in country_codes {
             info!("Processing country: {}", country_code);
 
-            let country_dir = self.config.localities_dir().join(country_code);
+            let country_dir = self.config.localities_dir.join(country_code);
             ensure_dir_exists(&country_dir)?;
 
             let localities = self
@@ -269,20 +232,8 @@ impl ExtractionService {
         Ok(())
     }
 
-    pub async fn ensure_all_localities_present(&self) -> Result<(), ExtractionError> {
-        let countries = self.config.target_countries.clone();
-
-        if countries.is_empty() {
-            return Err(ExtractionError::ExtractionFailed(
-                "No target countries specified".to_string(),
-            ));
-        }
-
-        self.extract_localities(&countries).await
-    }
-
-    async fn get_pmtiles_file_count(&self, country_code: &str) -> Result<u32, ExtractionError> {
-        let country_dir = self.config.localities_dir().join(country_code);
+    pub async fn get_pmtiles_file_count(&self, country_code: &str) -> Result<u32, ExtractionError> {
+        let country_dir = self.config.localities_dir.join(country_code);
 
         if !country_dir.exists() {
             return Ok(0);

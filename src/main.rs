@@ -1,45 +1,34 @@
-use crate::{
-    api::{countries, localities, pmtiles},
-    config::Config,
-    initialization::{
-        ensure_all_localities_present, ensure_database_is_present, ensure_tools_are_present,
-    },
-    services::tor::TorServiceManager,
-    services::{country::CountryService, database::DatabaseService, extraction::ExtractionService},
+use crate::config::LocalitySrvConfig;
+use crate::initialization::{
+    check_upload_readiness, ensure_all_localities_present, ensure_codex_data_directory,
+    ensure_database_is_present, ensure_tools_are_present, initialize_codex_node,
+    print_upload_readiness,
 };
-use axum::{
-    routing::{get, Router},
-    Json,
+use crate::services::{
+    country::CountryService, database::DatabaseService, extraction::ExtractionService,
+    node_ops::NodeOps,
 };
 use clap::Parser;
-use reqwest::StatusCode;
 use std::sync::Arc;
-use tower_http::cors::CorsLayer;
-use tracing::error;
+use tokio::signal;
+use tracing::{error, info};
 
-mod api;
 mod cli;
 mod config;
 mod initialization;
 mod models;
+mod node;
 mod services;
 mod utils;
 
-#[derive(Clone)]
-pub struct AppState {
-    pub config: Arc<tokio::sync::Mutex<Config>>,
-    pub db_service: Arc<DatabaseService>,
-    pub extraction_service: Arc<ExtractionService>,
-    pub country_service: Arc<CountryService>,
-}
-
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().init();
 
     let args = cli::Args::parse();
 
-    let config = match Config::from_env() {
+    // Load configuration
+    let config = match LocalitySrvConfig::from_env() {
         Ok(config) => Arc::new(config),
         Err(e) => {
             error!("Failed to load configuration: {}", e);
@@ -47,6 +36,9 @@ async fn main() {
         }
     };
 
+    info!("Starting localitysrv decentralized node...");
+
+    // Ensure required tools are present
     if let Err(e) =
         ensure_tools_are_present(&[&config.pmtiles_cmd, &config.bzip2_cmd, &config.find_cmd]).await
     {
@@ -54,26 +46,39 @@ async fn main() {
         std::process::exit(1);
     }
 
+    // Ensure Codex data directory exists
+    if let Err(e) = ensure_codex_data_directory(&config).await {
+        error!("Failed to ensure Codex data directory: {}", e);
+        std::process::exit(1);
+    }
+
+    // Ensure database is present
     if let Err(e) = ensure_database_is_present(&config, &args).await {
         error!("Failed to ensure database is present: {}", e);
         std::process::exit(1);
     }
 
-    let db_service = match DatabaseService::new(
-        &config.database_url(),
-        &config.database_path().to_string_lossy(),
-        &config.whosonfirst_db_url,
-        &config.bzip2_cmd,
-    )
-    .await
-    {
-        Ok(service) => Arc::new(service),
-        Err(e) => {
-            error!("Failed to initialize database service: {}", e);
-            std::process::exit(1);
-        }
-    };
+    // Initialize WhosOnFirst database service (read-only)
+    let whosonfirst_db_service =
+        match DatabaseService::new(&config.database_path.to_string_lossy()).await {
+            Ok(service) => Arc::new(service),
+            Err(e) => {
+                error!("Failed to initialize WhosOnFirst database service: {}", e);
+                std::process::exit(1);
+            }
+        };
 
+    // Initialize CID mappings database service (read-write)
+    let cid_db_service =
+        match DatabaseService::new(&config.cid_database_path.to_string_lossy()).await {
+            Ok(service) => Arc::new(service),
+            Err(e) => {
+                error!("Failed to initialize CID database service: {}", e);
+                std::process::exit(1);
+            }
+        };
+
+    // Initialize country service
     let country_service = match CountryService::new(&config.country_codes_path()).await {
         Ok(service) => Arc::new(service),
         Err(e) => {
@@ -82,13 +87,18 @@ async fn main() {
         }
     };
 
-    let extraction_service = Arc::new(ExtractionService::new(config.clone(), db_service.clone()));
+    // Initialize extraction service (uses WhosOnFirst database)
+    let extraction_service = Arc::new(ExtractionService::new(
+        config.clone(),
+        whosonfirst_db_service.clone(),
+    ));
 
+    // Ensure all localities are extracted
     if let Err(e) = ensure_all_localities_present(
         &extraction_service,
         &country_service,
         &config,
-        &db_service,
+        &whosonfirst_db_service,
         &args,
     )
     .await
@@ -97,123 +107,79 @@ async fn main() {
         std::process::exit(1);
     }
 
-    tracing::info!("Initialization complete, starting services...");
-
-    let app_state = AppState {
-        config: Arc::new(tokio::sync::Mutex::new((*config).clone())),
-        db_service: db_service.clone(),
-        extraction_service: extraction_service.clone(),
-        country_service: country_service.clone(),
-    };
-
-    let app = Router::new()
-        .route("/countries", get(countries::search_countries))
-        .route(
-            "/countries/{country_code}/localities",
-            get(localities::search_localities),
-        )
-        .route(
-            "/countries/{country_code}/localities/{id}/pmtiles",
-            get(pmtiles::serve_pmtiles),
-        )
-        .route(
-            "/health",
-            get({
-                (
-                    StatusCode::OK,
-                    Json(serde_json::json!({ "status": "healthy" })),
-                )
-            }),
-        )
-        .layer(CorsLayer::permissive())
-        .with_state(app_state.clone());
-
-    let shutdown_signal = std::sync::Arc::new(tokio::sync::Notify::new());
-
-    let app_for_tor = app.clone();
-    let app_for_regular = app.clone();
-
-    let shutdown_signal_tor = shutdown_signal.clone();
-    let shutdown_signal_regular = shutdown_signal.clone();
-
-    let (onion_address_tx, onion_address_rx) = tokio::sync::oneshot::channel();
-
-    let app_state_for_tor = app_state.clone();
-
-    let tor_manager = TorServiceManager::new(app_for_tor, app_state_for_tor, shutdown_signal_tor);
-
-    let tor_handle = tokio::spawn(async move {
-        tor_manager.run_with_retry(onion_address_tx).await;
-    });
-
-    let onion_address = match onion_address_rx.await {
-        Ok(address) => address,
-        Err(_) => {
-            error!("Failed to get onion address from Tor hidden service");
-            return;
+    // Initialize Codex node
+    let node_manager = match initialize_codex_node(&config).await {
+        Ok(manager) => Arc::new(manager),
+        Err(e) => {
+            error!("Failed to initialize Codex node: {}", e);
+            std::process::exit(1);
         }
     };
 
-    {
-        let mut config = app_state.config.lock().await;
-        config.onion_address = Some(onion_address.clone());
+    info!("Initialization complete, starting upload process...");
+
+    // Check upload readiness
+    let readiness_map = check_upload_readiness(
+        &whosonfirst_db_service,
+        &extraction_service,
+        &config.target_countries,
+    )
+    .await?;
+
+    print_upload_readiness(&readiness_map);
+
+    // Create node operations service (uses CID database for storage, WhosOnFirst for lookups)
+    let node_ops = NodeOps::new_with_databases(
+        cid_db_service.clone(),
+        whosonfirst_db_service.clone(),
+        node_manager.clone(),
+    );
+
+    // Process all localities for upload
+    if let Err(e) = node_ops.process_all_localities().await {
+        error!("Failed to process localities: {}", e);
+        std::process::exit(1);
     }
 
-    let regular_handle = tokio::spawn(async move {
-        run_axum_server(app_for_regular, config.clone(), shutdown_signal_regular).await;
-    });
+    // Get final statistics
+    let stats = node_ops.get_stats().await;
+    info!(
+        "Upload process completed! Total uploaded: {}, Total failed: {}, Total bytes: {}",
+        stats.total_uploaded, stats.total_failed, stats.total_bytes_uploaded
+    );
 
+    // Get database statistics
+    let (total_mappings, unique_countries) = cid_db_service.get_cid_mapping_stats().await?;
+    info!(
+        "Database contains {} CID mappings across {} countries",
+        total_mappings, unique_countries
+    );
+
+    info!("All localities uploaded and CID mappings stored!");
+    info!("Node is now running and serving files to the network...");
+    info!("Press Ctrl+C to stop the node gracefully");
+
+    // Keep the node running until interrupted
     tokio::select! {
-        _ = tor_handle => {}
-        _ = regular_handle => {}
-        _ = tokio::signal::ctrl_c() => {
-            tracing::info!("\nShutdown signal received, shutting down...");
-            shutdown_signal.notify_waiters();
-
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        _ = async {
+            signal::ctrl_c().await.expect("Failed to listen for ctrl+c");
+        } => {
+            info!("Received Ctrl+C, shutting down gracefully...");
+        }
+        _ = async {
+            let mut sig_term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("Failed to setup SIGTERM handler");
+            sig_term.recv().await;
+        } => {
+            info!("Received termination signal, shutting down gracefully...");
         }
     }
-}
 
-async fn run_axum_server(
-    app: Router,
-    config: Arc<Config>,
-    shutdown_signal: std::sync::Arc<tokio::sync::Notify>,
-) {
-    tracing::info!("Starting Axum server...");
-
-    let address = "127.0.0.1";
-    let port = config.server_port;
-
-    let listener = match tokio::net::TcpListener::bind(&format!("{}:{}", address, port)).await {
-        Ok(listener) => {
-            tracing::info!("TCP listener bound to {}:{}", address, port);
-            listener
-        }
-        Err(e) => {
-            error!(
-                "TCP listener: Failed to bind to {}:{}: {}",
-                address, port, e
-            );
-            return;
-        }
-    };
-
-    let shutdown = shutdown_signal.clone();
-
-    match axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            tracing::info!("✓ Axum server successfully started");
-            shutdown.notified().await;
-            tracing::info!("Axum server shutting down...");
-        })
-        .await
-    {
-        Ok(_) => {
-            tracing::info!("Axum server stopped successfully");
-        }
-        Err(e) => {
-            error!("Axum server error: {}", e);
-        }
+    // Stop the node gracefully
+    if let Err(e) = node_manager.stop().await {
+        error!("Failed to stop Codex node: {}", e);
     }
+
+    info!("Node stopped successfully");
+    Ok(())
 }
