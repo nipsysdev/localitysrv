@@ -8,8 +8,6 @@ use localitysrv::services::database::DatabaseService;
 use localitysrv::services::node_ops::NodeOps;
 use std::fs;
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::time::timeout;
 
 #[tokio::test]
 async fn test_real_codex_integration() -> Result<(), Box<dyn std::error::Error>> {
@@ -20,7 +18,8 @@ async fn test_real_codex_integration() -> Result<(), Box<dyn std::error::Error>>
 
     // Use tests/resources directory for all test data
     let test_resources_dir = std::path::Path::new("tests/resources");
-    let db_path = test_resources_dir.join("test_integration.db");
+    let whosonfirst_db_path = test_resources_dir.join("test_whosonfirst.db");
+    let cid_db_path = test_resources_dir.join("test_cid_mappings.db");
     let localities_dir = test_resources_dir.join("localities");
 
     // Clean up any existing test data
@@ -39,16 +38,24 @@ async fn test_real_codex_integration() -> Result<(), Box<dyn std::error::Error>>
     println!("✓ Copied real PMTiles files to test directory");
 
     // Create test configuration
-    let config = create_test_config(&db_path, &localities_dir)?;
+    let config = create_test_config(&whosonfirst_db_path, &cid_db_path, &localities_dir)?;
 
-    // Initialize database service (this will create and set up the database)
-    let db_service = Arc::new(DatabaseService::new(&db_path.to_string_lossy()).await?);
+    // Initialize WhosOnFirst database service (read-only)
+    let whosonfirst_db_service =
+        Arc::new(DatabaseService::new(&whosonfirst_db_path.to_string_lossy()).await?);
+
+    // Initialize CID mappings database service (read-write)
+    let cid_db_service = Arc::new(DatabaseService::new(&cid_db_path.to_string_lossy()).await?);
 
     // Create a real node manager
     let node_manager = Arc::new(CodexNodeManager::new(config.codex.clone()));
 
-    // Create node operations service
-    let node_ops = NodeOps::new(db_service.clone(), node_manager.clone());
+    // Create node operations service with separate databases
+    let node_ops = NodeOps::new_with_databases(
+        cid_db_service.clone(),
+        whosonfirst_db_service.clone(),
+        node_manager.clone(),
+    );
 
     println!("✓ Setup completed successfully");
 
@@ -56,23 +63,27 @@ async fn test_real_codex_integration() -> Result<(), Box<dyn std::error::Error>>
     verify_pmtiles_files(&localities_dir).await?;
     println!("✓ PMTiles files verified");
 
-    // Test 2: Insert test locality data into database
-    insert_test_locality_data(&db_service).await?;
-    println!("✓ Test locality data inserted");
+    // Test 2: Insert test CID mappings into CID database
+    insert_test_locality_data(&cid_db_service).await?;
+    println!("✓ Test CID mappings inserted into CID database");
 
     // Test 3: Test real Codex uploads
-    let (real_cid, real_size) = test_real_codex_uploads(&node_ops, &db_service).await?;
+    let (real_cid, real_size) = test_real_codex_uploads(&node_ops, &cid_db_service).await?;
     println!("✓ Real Codex uploads completed");
     println!("  Real CID: {}", real_cid);
     println!("  Real size: {} bytes", real_size);
 
-    // Test 4: Verify database contains uploaded CIDs
-    verify_database_cids(&db_service).await?;
+    // Test 4: Verify CID mappings database contains uploaded CIDs
+    verify_database_cids(&cid_db_service).await?;
     println!("✓ Database CID mappings verified");
 
     println!("Real Codex integration test completed successfully!");
-    println!("Test database saved at: {:?}", db_path);
-    println!("You can inspect the database with: sqlite3 {:?}", db_path);
+    println!("WhosOnFirst database saved at: {:?}", whosonfirst_db_path);
+    println!("CID mappings database saved at: {:?}", cid_db_path);
+    println!(
+        "You can inspect the databases with: sqlite3 {:?} and sqlite3 {:?}",
+        whosonfirst_db_path, cid_db_path
+    );
 
     // Clean up test data after successful test
     cleanup_test_data(&test_resources_dir).await?;
@@ -144,12 +155,11 @@ async fn verify_pmtiles_files(
 }
 
 async fn insert_test_locality_data(
-    db_service: &Arc<DatabaseService>,
+    cid_db_service: &Arc<DatabaseService>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Inserting test locality data for AE country...");
+    println!("Inserting test CID mappings for AE country...");
 
-    // Since we're not using the real WhosOnFirst database, we'll directly insert
-    // some test data into the CID mappings table to simulate uploaded localities
+    // Insert some test CID mappings to simulate uploaded localities
     let test_mappings = vec![
         (
             "AE".to_string(),
@@ -173,9 +183,11 @@ async fn insert_test_locality_data(
 
     // For testing purposes, we'll insert these as if they were already uploaded
     // to test the database operations. In the real upload test, we'll overwrite these.
-    db_service.batch_insert_cid_mappings(&test_mappings).await?;
+    cid_db_service
+        .batch_insert_cid_mappings(&test_mappings)
+        .await?;
 
-    println!("  Inserted {} test mappings", test_mappings.len());
+    println!("  Inserted {} test CID mappings", test_mappings.len());
     Ok(())
 }
 
@@ -274,23 +286,6 @@ async fn test_real_codex_uploads(
     Ok((upload_result.cid, upload_result.size as u64))
 }
 
-async fn clear_test_mappings(
-    db_service: &Arc<DatabaseService>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    println!("  Clearing existing test mappings...");
-
-    // Delete existing test mappings
-    let test_locality_ids = [421168683, 421168685, 421168687];
-
-    for locality_id in &test_locality_ids {
-        // We would need to implement a delete method in DatabaseService
-        // For now, we'll just note that this would clear the mappings
-        println!("    Would clear mapping for AE-{}", locality_id);
-    }
-
-    Ok(())
-}
-
 async fn verify_database_cids(
     db_service: &Arc<DatabaseService>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -309,7 +304,8 @@ async fn verify_database_cids(
 }
 
 fn create_test_config(
-    db_path: &std::path::Path,
+    whosonfirst_db_path: &std::path::Path,
+    cid_db_path: &std::path::Path,
     localities_dir: &std::path::Path,
 ) -> Result<LocalitySrvConfig, Box<dyn std::error::Error>> {
     use codex_bindings::{CodexConfig, LogLevel};
@@ -327,8 +323,8 @@ fn create_test_config(
     Ok(LocalitySrvConfig {
         codex: codex_config,
         data_dir: codex_data_dir,
-        database_path: db_path.to_path_buf(),
-        cid_database_path: db_path.to_path_buf(), // Use same path for CID database in test
+        database_path: whosonfirst_db_path.to_path_buf(),
+        cid_database_path: cid_db_path.to_path_buf(), // Separate database for CID mappings
         localities_dir: localities_dir.to_path_buf(),
         pmtiles_cmd: "pmtiles".to_string(),
         bzip2_cmd: "bzip2".to_string(),
@@ -343,11 +339,23 @@ fn create_test_config(
 async fn cleanup_test_data(
     test_resources_dir: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Remove test database if it exists
-    let test_db_path = test_resources_dir.join("test_integration.db");
-    if test_db_path.exists() {
-        fs::remove_file(&test_db_path)?;
-        println!("✓ Removed existing test database: {:?}", test_db_path);
+    // Remove test databases if they exist
+    let test_whosonfirst_db_path = test_resources_dir.join("test_whosonfirst.db");
+    if test_whosonfirst_db_path.exists() {
+        fs::remove_file(&test_whosonfirst_db_path)?;
+        println!(
+            "✓ Removed existing WhosOnFirst test database: {:?}",
+            test_whosonfirst_db_path
+        );
+    }
+
+    let test_cid_db_path = test_resources_dir.join("test_cid_mappings.db");
+    if test_cid_db_path.exists() {
+        fs::remove_file(&test_cid_db_path)?;
+        println!(
+            "✓ Removed existing CID mappings test database: {:?}",
+            test_cid_db_path
+        );
     }
 
     // Remove .codex-test-data directory if it exists

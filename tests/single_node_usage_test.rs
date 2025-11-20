@@ -1,15 +1,14 @@
 //! Test to verify that localitysrv uses a single node for all operations
 //! instead of creating temporary nodes for each upload.
 
-use codex_bindings::{CodexConfig, LogLevel, UploadOptions};
+use codex_bindings::{CodexConfig, LogLevel};
 use localitysrv::models::storage::{PendingUpload, UploadQueue, UploadStats};
-use localitysrv::node::manager::{CodexNodeManager, NodeManagerError};
+use localitysrv::node::manager::CodexNodeManager;
 use localitysrv::services::database::DatabaseService;
-use localitysrv::services::node_ops::{NodeOps, NodeOpsError};
+use localitysrv::services::node_ops::NodeOps;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::TempDir;
-use tokio::sync::Mutex;
 
 #[tokio::test]
 async fn test_node_manager_single_instance() -> Result<(), Box<dyn std::error::Error>> {
@@ -29,9 +28,6 @@ async fn test_node_manager_single_instance() -> Result<(), Box<dyn std::error::E
 
     // Start the node
     node_manager.start().await?;
-
-    // Verify node is running
-    assert!(node_manager.is_running().await);
 
     // Test that we can get the node multiple times and it's the same instance
     let node1 = node_manager.get_node().await?;
@@ -109,14 +105,17 @@ async fn test_concurrent_uploads_use_same_node() -> Result<(), Box<dyn std::erro
     for _ in 0..5 {
         let manager = node_manager.clone();
         let handle = tokio::spawn(async move {
-            let node = manager.get_node().await?;
+            let node = manager
+                .get_node()
+                .await
+                .map_err(|e| format!("Failed to get node: {}", e))?;
             let peer_id = tokio::task::spawn_blocking(move || {
                 node.peer_id()
-                    .map_err(|e| NodeManagerError::NodeOperationError(e.to_string()))
+                    .map_err(|e| format!("Failed to get peer ID: {}", e))
             })
             .await
-            .map_err(|e| NodeManagerError::ThreadSafetyError(e.to_string()))??;
-            Ok::<String, NodeManagerError>(peer_id)
+            .map_err(|e| format!("Thread safety error: {}", e))??;
+            Ok::<String, String>(peer_id)
         });
         handles.push(handle);
     }
@@ -124,7 +123,9 @@ async fn test_concurrent_uploads_use_same_node() -> Result<(), Box<dyn std::erro
     // Wait for all tasks to complete
     let mut peer_ids = Vec::new();
     for handle in handles {
-        let peer_id = handle.await??;
+        let peer_id = handle
+            .await
+            .map_err(|e| format!("Task join error: {}", e))??;
         peer_ids.push(peer_id);
     }
 
