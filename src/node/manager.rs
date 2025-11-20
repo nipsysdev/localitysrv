@@ -101,19 +101,6 @@ impl CodexNodeManager {
         Ok(())
     }
 
-    /// Execute an operation on the running node
-    pub async fn with_node<F, R>(&self, operation: F) -> Result<R, NodeManagerError>
-    where
-        F: FnOnce(CodexNode) -> Result<R, NodeManagerError> + Send + 'static,
-        R: Send + 'static,
-    {
-        let node = self.get_node().await?;
-
-        tokio::task::spawn_blocking(move || with_libcodex_lock(|| operation(node)))
-            .await
-            .map_err(|e| NodeManagerError::ThreadSafetyError(e.to_string()))?
-    }
-
     /// Get node information
     pub async fn get_peer_id(&self) -> Result<String, NodeManagerError> {
         let node = self.get_node().await?;
@@ -126,37 +113,6 @@ impl CodexNodeManager {
         })
         .await
         .map_err(|e| NodeManagerError::ThreadSafetyError(e.to_string()))?
-    }
-
-    pub async fn get_version(&self) -> Result<String, NodeManagerError> {
-        let node = self.get_node().await?;
-
-        tokio::task::spawn_blocking(move || {
-            with_libcodex_lock(|| {
-                node.version()
-                    .map_err(|e| NodeManagerError::NodeOperationError(e.to_string()))
-            })
-        })
-        .await
-        .map_err(|e| NodeManagerError::ThreadSafetyError(e.to_string()))?
-    }
-
-    pub async fn get_repo(&self) -> Result<String, NodeManagerError> {
-        let node = self.get_node().await?;
-
-        tokio::task::spawn_blocking(move || {
-            with_libcodex_lock(|| {
-                node.repo()
-                    .map_err(|e| NodeManagerError::NodeOperationError(e.to_string()))
-            })
-        })
-        .await
-        .map_err(|e| NodeManagerError::ThreadSafetyError(e.to_string()))?
-    }
-
-    /// Check if the node is running
-    pub async fn is_running(&self) -> bool {
-        *self.is_running.lock().await
     }
 
     /// Get a reference to the managed node for operations

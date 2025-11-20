@@ -29,16 +29,6 @@ pub struct NodeOps {
 }
 
 impl NodeOps {
-    pub fn new(db_service: Arc<DatabaseService>, node_manager: Arc<CodexNodeManager>) -> Self {
-        Self {
-            db_service: db_service.clone(),
-            whosonfirst_db_service: db_service, // Use same database for both
-            node_manager,
-            upload_queue: Arc::new(Mutex::new(UploadQueue::new(10, 100))),
-            stats: Arc::new(Mutex::new(UploadStats::new())),
-        }
-    }
-
     pub fn new_with_databases(
         cid_db_service: Arc<DatabaseService>,
         whosonfirst_db_service: Arc<DatabaseService>,
@@ -361,30 +351,6 @@ impl NodeOps {
 
         info!("Updated {} CID mappings in database", mappings.len());
         Ok(())
-    }
-
-    /// Get all countries that have localities from the database
-    async fn get_all_countries(&self) -> Result<Vec<String>, NodeOpsError> {
-        // For now, return a list of common countries
-        // This can be enhanced later to query from database
-        Ok(vec![
-            "US".to_string(),
-            "CA".to_string(),
-            "GB".to_string(),
-            "DE".to_string(),
-            "FR".to_string(),
-            "IT".to_string(),
-            "ES".to_string(),
-            "JP".to_string(),
-            "AU".to_string(),
-            "BR".to_string(),
-        ])
-    }
-
-    /// Get the file path for a locality's PMTiles file
-    fn get_locality_file_path(&self, country_code: &str, locality_id: u32) -> std::path::PathBuf {
-        // This should match the extraction service's output pattern
-        format!("assets/localities/{}/{}.pmtiles", country_code, locality_id).into()
     }
 
     /// Get current upload statistics
