@@ -11,7 +11,7 @@ use crate::services::{
 use clap::Parser;
 use std::sync::Arc;
 use tokio::signal;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 mod cli;
 mod config;
@@ -156,7 +156,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     info!("All localities uploaded and CID mappings stored!");
-    info!("Node is now running and serving files to the network...");
+
+    match node_manager.get_peer_id().await {
+        Ok(peer_id) => {
+            info!("Node is now running and serving files to the network...");
+            info!("Peer ID: {}", peer_id);
+            info!("Listen addresses:");
+            for addr in &config.codex.listen_addrs {
+                info!("  {}", addr);
+            }
+        }
+        Err(e) => {
+            info!("Node is now running and serving files to the network...");
+            warn!("Failed to get peer ID: {}", e);
+        }
+    }
+
     info!("Press Ctrl+C to stop the node gracefully");
 
     // Keep the node running until interrupted
