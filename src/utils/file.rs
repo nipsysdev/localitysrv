@@ -11,8 +11,6 @@ use tracing::info;
 pub enum FileError {
     #[error("Download failed: {0}")]
     DownloadFailed(String),
-    #[error("File operation failed: {0}")]
-    FileOperationFailed(String),
     #[error("IO error: {0}")]
     IoError(String),
     #[error("Reqwest error: {0}")]

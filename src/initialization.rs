@@ -1,5 +1,5 @@
 use crate::cli::Args;
-use crate::config::Config;
+use crate::config::LocalitySrvConfig;
 use crate::services::{
     country::CountryService, database::DatabaseService, extraction::ExtractionService,
 };
@@ -9,7 +9,7 @@ use std::path::Path;
 use tracing::{info, warn};
 
 async fn download_and_decompress_database(
-    config: &Config,
+    config: &LocalitySrvConfig,
     compressed_path: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("Downloading WhosOnFirst database...");
@@ -59,10 +59,10 @@ pub async fn ensure_tools_are_present(tools: &[&str]) -> Result<(), Box<dyn std:
 }
 
 pub async fn ensure_database_is_present(
-    config: &Config,
+    config: &LocalitySrvConfig,
     args: &Args,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let database_path = config.database_path();
+    let database_path = &config.database_path;
     let compressed_path = format!("{}.bz2", database_path.display());
 
     if database_path.exists() {
@@ -110,7 +110,7 @@ pub async fn ensure_database_is_present(
 pub async fn ensure_all_localities_present(
     extraction_service: &ExtractionService,
     country_service: &CountryService,
-    config: &Config,
+    config: &LocalitySrvConfig,
     db_service: &DatabaseService,
     args: &Args,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -206,4 +206,130 @@ pub async fn ensure_all_localities_present(
     }
     info!("Extraction skipped.");
     Ok(())
+}
+
+/// Initialize and start the Codex node
+pub async fn initialize_codex_node(
+    config: &LocalitySrvConfig,
+) -> Result<crate::node::manager::CodexNodeManager, Box<dyn std::error::Error>> {
+    info!("Initializing Codex node...");
+
+    // Create Codex configuration from the main config
+    let codex_config = config.codex.clone();
+
+    // Create node manager
+    let node_manager = crate::node::manager::CodexNodeManager::new(codex_config);
+
+    // Start the node
+    node_manager.start().await?;
+
+    info!("Codex node started successfully");
+    Ok(node_manager)
+}
+
+/// Ensure Codex data directory exists
+pub async fn ensure_codex_data_directory(
+    config: &LocalitySrvConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let data_dir = &config.data_dir;
+
+    if !data_dir.exists() {
+        info!(
+            "Creating Codex data directory with secure permissions: {:?}",
+            data_dir
+        );
+        std::fs::create_dir_all(data_dir)?;
+
+        // Set secure permissions (0700 - read/write/execute for owner only)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(data_dir)?.permissions();
+            perms.set_mode(0o700);
+            std::fs::set_permissions(data_dir, perms)?;
+        }
+    } else {
+        // Check and fix permissions if directory already exists
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let metadata = std::fs::metadata(data_dir)?;
+            let current_mode = metadata.permissions().mode();
+
+            // Check if permissions are too permissive (not 0700)
+            if current_mode & 0o077 != 0 {
+                info!(
+                    "Fixing insecure permissions on Codex data directory: {:?}",
+                    data_dir
+                );
+                let mut perms = metadata.permissions();
+                perms.set_mode(0o700);
+                std::fs::set_permissions(data_dir, perms)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Check if localities are ready for upload (exist and not already uploaded)
+pub async fn check_upload_readiness(
+    db_service: &DatabaseService,
+    extraction_service: &ExtractionService,
+    country_codes: &[String],
+) -> Result<HashMap<String, UploadReadiness>, Box<dyn std::error::Error>> {
+    let mut readiness_map = HashMap::new();
+
+    for country_code in country_codes {
+        let db_count = db_service.get_country_locality_count(country_code).await?;
+        let file_count = extraction_service
+            .get_pmtiles_file_count(country_code)
+            .await?;
+
+        // Check how many are already uploaded - simplified for now
+        let uploaded_count = 0u32;
+
+        let readiness = UploadReadiness {
+            total_localities: db_count,
+            extracted_files: file_count,
+            uploaded_files: uploaded_count,
+            ready_for_upload: file_count > uploaded_count,
+        };
+
+        readiness_map.insert(country_code.clone(), readiness);
+    }
+
+    Ok(readiness_map)
+}
+
+#[derive(Debug, Clone)]
+pub struct UploadReadiness {
+    pub total_localities: u32,
+    pub extracted_files: u32,
+    pub uploaded_files: u32,
+    pub ready_for_upload: bool,
+}
+
+/// Print upload readiness status
+pub fn print_upload_readiness(readiness_map: &HashMap<String, UploadReadiness>) {
+    info!("Upload Readiness Status:");
+    info!("Country Code | Total | Extracted | Uploaded | Ready");
+    info!("-------------|-------|-----------|----------|-------");
+
+    for (country_code, readiness) in readiness_map {
+        let ready = if readiness.ready_for_upload {
+            "✓ Yes"
+        } else {
+            "✗ No"
+        };
+
+        info!(
+            "{:12} | {:5} | {:9} | {:8} | {}",
+            country_code,
+            readiness.total_localities,
+            readiness.extracted_files,
+            readiness.uploaded_files,
+            ready
+        );
+    }
 }
